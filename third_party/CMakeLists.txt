@@ -453,8 +453,21 @@ if(WIN32)
   )
   target_include_directories(SDL2 PUBLIC SDL2/include)
   target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
+elseif(APPLE)
+  # Build SDL2 from the submodule and link it statically, so the app doesn't
+  # depend on a system copy - Homebrew's sdl2 is now sdl2-compat, which also
+  # needs SDL3 at runtime.
+  set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+  set(SDL_STATIC ON CACHE BOOL "" FORCE)
+  set(SDL_TEST OFF CACHE BOOL "" FORCE)
+  set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+  set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+  set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+  add_subdirectory(SDL2 EXCLUDE_FROM_ALL)
+  add_library(SDL2 INTERFACE)
+  target_link_libraries(SDL2 INTERFACE SDL2::SDL2-static)
 else()
-  # Use system SDL2 on Linux and macOS (e.g. `brew install sdl2`)
+  # Use system SDL2 on Linux
   add_library(SDL2 INTERFACE)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2_PKG REQUIRED sdl2)

@@ -148,7 +148,7 @@ Install the Xcode command line tools (`xcode-select --install`), and the
 dependencies with [Homebrew](https://brew.sh):
 
 ```sh
-brew install cmake ninja pkgconf sdl2 molten-vk glslang spirv-tools
+brew install cmake ninja molten-vk glslang spirv-tools
 ```
 
 Then build with `xb build` like on the other platforms. The result is an app
