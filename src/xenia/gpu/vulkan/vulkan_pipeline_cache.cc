@@ -458,20 +458,28 @@ VulkanPipelineCache::GetCurrentVertexShaderModification(
         regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
   }
 
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      command_processor_.GetVulkanDevice()->properties();
+
   // User clip planes.
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   uint32_t user_clip_planes =
-      pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+      pa_cl_clip_cntl.clip_disable || !device_properties.shaderClipDistance
+          ? 0
+          : pa_cl_clip_cntl.ucp_ena;
   modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+  // Without cull distances (such as on MoltenVK), clip instead of culling.
   modification.vertex.user_clip_plane_cull =
-      uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
+      uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena &&
+               device_properties.shaderCullDistance);
 
   // Vertex kill via the kill flag (oPts.z). The "and" operator (kill only when
   // all vertices of the primitive request it) is emulated with a cull distance;
-  // the "or" operator sets the position to NaN in the translator.
-  modification.vertex.vertex_kill_and =
-      uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b100) &&
-               !pa_cl_clip_cntl.vtx_kill_or);
+  // the "or" operator sets the position to NaN in the translator, which is also
+  // used as a fallback for "and" if cull distances are not supported.
+  modification.vertex.vertex_kill_and = uint32_t(
+      (shader.writes_point_size_edge_flag_kill_vertex() & 0b100) &&
+      !pa_cl_clip_cntl.vtx_kill_or && device_properties.shaderCullDistance);
 
   if (host_vertex_shader_type ==
       Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
