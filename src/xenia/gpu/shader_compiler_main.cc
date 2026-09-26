@@ -47,8 +47,9 @@ DEFINE_string(shader_output_type, "ucode",
 DEFINE_string(
     vertex_shader_output_type, "",
     "Type of the host interface to produce the vertex or domain shader for: "
-    "[vertex or unspecified, linedomaincp, linedomainpatch, triangledomaincp, "
-    "triangledomainpatch, quaddomaincp, quaddomainpatch].",
+    "[vertex or unspecified, pointlist, rectanglelist, linedomaincp, "
+    "linedomainpatch, triangledomaincp, triangledomainpatch, quaddomaincp, "
+    "quaddomainpatch].",
     "GPU");
 DEFINE_bool(shader_output_bindless_resources, false,
             "Output host shader with bindless resources used.", "GPU");
@@ -144,7 +145,13 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   Shader::HostVertexShaderType host_vertex_shader_type =
       Shader::HostVertexShaderType::kVertex;
   if (shader_type == xenos::ShaderType::kVertex) {
-    if (cvars::vertex_shader_output_type == "linedomaincp") {
+    if (cvars::vertex_shader_output_type == "pointlist") {
+      host_vertex_shader_type =
+          Shader::HostVertexShaderType::kPointListAsTriangleStrip;
+    } else if (cvars::vertex_shader_output_type == "rectanglelist") {
+      host_vertex_shader_type =
+          Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+    } else if (cvars::vertex_shader_output_type == "linedomaincp") {
       host_vertex_shader_type =
           Shader::HostVertexShaderType::kLineDomainCPIndexed;
     } else if (cvars::vertex_shader_output_type == "linedomainpatch") {
