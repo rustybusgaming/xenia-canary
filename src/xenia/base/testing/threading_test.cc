@@ -331,7 +331,10 @@ TEST_CASE("Wait on Multiple Handles", "[wait]") {
   REQUIRE(any_result.first == WaitResult::kSuccess);
   REQUIRE(any_result.second == 0);
 
-  auto all_result = WaitAll(handles, false, 100ms);
+  // Needs the thread to finish its two 25ms waits. Leave plenty of headroom
+  // for scheduling delays on loaded machines (such as CI virtual machines), as
+  // the thread would outlive the handles it uses if this timed out.
+  auto all_result = WaitAll(handles, false, 1000ms);
   REQUIRE(all_result == WaitResult::kSuccess);
 }
 
