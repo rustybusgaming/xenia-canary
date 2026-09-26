@@ -69,3 +69,96 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           archive: false
+
+  ppc-test-binaries:
+    name: Generate PPC test binaries
+    # The patched binutils used to assemble the PPC tests doesn't build on
+    # Apple silicon, so assemble them on Linux and pass them to the test job.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache binutils
+        id: cache-binutils
+        uses: actions/cache@v6
+        with:
+          path: |-
+            third_party/binutils/bin
+            third_party/binutils/powerpc-none-elf
+          key: ${{ runner.os }}-binutils-${{ hashFiles('third_party/binutils/build.sh', 'third_party/binutils/*.patch') }}
+
+      - name: Install binutils build dependencies
+        if: ${{ steps.cache-binutils.outputs.cache-hit != 'true' }}
+        run: sudo apt-get -y install texinfo bison flex
+
+      - name: Generate test binaries
+        env:
+          # binutils 2.24 predates GCC defaulting to -fno-common.
+          CFLAGS: -O2 -w -std=gnu99 -fcommon
+        run: ./xenia-build.py gentests
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: ppc-test-binaries
+          path: src/xenia/cpu/ppc/testing/bin
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: Test
+    needs: ppc-test-binaries
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup build environment
+        run: |-
+          brew update
+          brew install ninja pkgconf sdl2 molten-vk glslang spirv-tools
+
+      - name: Download submodules
+        run: |- # Exclude unneeded submodules
+          SUBMODULES=$(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -vE '^third_party/DirectX(-Headers|ShaderCompiler)$')
+          git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $SUBMODULES
+
+      - name: Build tests
+        run: >-
+          ./xenia-build.py build --config=Release --build-tests
+          --target=xenia-base-tests
+          --target=xenia-cpu-tests
+          --target=xenia-kernel-tests
+          --target=xenia-vfs-tests
+          --target=xenia-cpu-ppc-tests
+
+      - name: Download PPC test binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: ppc-test-binaries
+          path: src/xenia/cpu/ppc/testing/bin
+
+      - name: Run tests
+        run: |-
+          if ! ls src/xenia/cpu/ppc/testing/bin/*.bin > /dev/null 2>&1; then
+            echo "::error::PPC test binaries are missing."
+            exit 1
+          fi
+          bin=build/bin/macOS/Release
+          failed=""
+          for suite in xenia-base-tests xenia-cpu-tests xenia-kernel-tests xenia-vfs-tests xenia-cpu-ppc-tests; do
+            echo "::group::$suite"
+            if ! $bin/$suite; then
+              failed="$failed $suite"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Failed test suites:$failed"
+            exit 1
+          fi
