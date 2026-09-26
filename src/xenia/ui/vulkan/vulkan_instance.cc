@@ -22,6 +22,7 @@
 
 #if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 #include <dlfcn.h>
+#include <cstdlib>
 #elif XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif
@@ -82,6 +83,10 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
       "/opt/homebrew/lib/libMoltenVK.dylib",
       "/usr/local/lib/libMoltenVK.dylib",
   };
+  // MoltenVK configuration suited for Xenia, unless overridden in the
+  // environment. Xenia creates many pipelines while games are running, let
+  // Metal use more threads for compiling them to reduce stuttering.
+  setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
   for (const char* loader_library_name : kLoaderLibraryNames) {
     vulkan_instance->loader_ =
         dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
