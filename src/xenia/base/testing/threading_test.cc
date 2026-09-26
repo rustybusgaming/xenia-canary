@@ -1012,6 +1012,10 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   WaitResult result;
   Thread::CreationParameters params = {};
   auto func = [] { Sleep(20ms); };
+  // For waiting for a running thread to finish. Generous to tolerate
+  // scheduling delays on loaded machines (such as CI virtual machines), as the
+  // thread would outlive the Thread object if the wait timed out.
+  constexpr auto kFinishTimeout = 1000ms;
 
   // Create initially suspended
   params.create_suspended = true;
@@ -1019,7 +1023,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
   params.create_suspended = false;
 
@@ -1029,7 +1033,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 
   // Test recursive suspend
@@ -1042,7 +1046,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 
   // Test suspend count
@@ -1064,7 +1068,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   REQUIRE(suspend_count == 0);
   thread->Resume(&suspend_count);
   REQUIRE(suspend_count == 1);
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 }
 
