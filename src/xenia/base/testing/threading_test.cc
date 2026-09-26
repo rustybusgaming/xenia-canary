@@ -878,7 +878,8 @@ TEST_CASE("Wait on Multiple Timers", "[timer]") {
   all_result = WaitAll({timer0.get(), timer1.get()}, false, 100ms);
   REQUIRE(all_result == WaitResult::kSuccess);
   REQUIRE(timer0->SetOnceAfter(1ms));
-  Sleep(2ms);
+  // Give the timer enough time to fire even if the thread is descheduled.
+  Sleep(100ms);
   any_result = WaitAny({timer0.get(), timer1.get()}, false, 100ms);
   REQUIRE(any_result.first == WaitResult::kSuccess);
   REQUIRE(any_result.second == 0);
