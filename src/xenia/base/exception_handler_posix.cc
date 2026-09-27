@@ -286,6 +286,30 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // Not handled by Xenia (a real crash). Restore the original handler (usually
+  // the default one, terminating the process with a crash report) so the
+  // faulting instruction, executed again after returning, doesn't cause an
+  // infinite loop of exceptions, hanging the thread.
+  const struct sigaction* original_handler = nullptr;
+  switch (signal_number) {
+    case SIGILL:
+      original_handler = &original_sigill_handler_;
+      break;
+    case SIGSEGV:
+      original_handler = &original_sigsegv_handler_;
+      break;
+#if XE_PLATFORM_MAC
+    case SIGBUS:
+      original_handler = &original_sigbus_handler_;
+      break;
+#endif
+    default:
+      break;
+  }
+  if (original_handler) {
+    sigaction(signal_number, original_handler, nullptr);
+  }
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
