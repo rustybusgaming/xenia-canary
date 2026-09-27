@@ -29,15 +29,6 @@
 DEFINE_path(mappings_file, "gamecontrollerdb.txt",
             "Filename of a database with custom game controller mappings.",
             "SDL");
-DEFINE_string(
-    controller_type, "auto",
-    "Type of controller reported to games for SDL controllers. \"auto\" "
-    "reports the type detected by SDL. Set it to \"gamepad\", \"guitar\", "
-    "\"guitar_alternate\", \"guitar_bass\", \"drum_kit\", \"wheel\", "
-    "\"arcade_stick\", \"flight_stick\", \"dance_pad\" or \"arcade_pad\" "
-    "for controllers detected as another type, such as guitars connected "
-    "through a dongle presenting them as a gamepad.",
-    "SDL");
 
 namespace xe {
 namespace hid {
