@@ -593,6 +593,25 @@ static void CriticalSectionPrefetchW(const void* vp) {
 #endif
 }
 
+// Hints the CPU that the thread is spinning waiting for another thread.
+static inline void CriticalSectionSpinPause() {
+#if XE_ARCH_AMD64 == 1
+  _mm_pause();
+#elif XE_ARCH_ARM64 == 1
+#if XE_COMPILER_MSVC
+  __yield();
+#else
+  __asm__ __volatile__("yield");
+#endif
+#endif
+}
+
+// Number of spins before waiting for a critical section whose owner didn't
+// request spinning. Waiting involves a host thread switch, which is costly
+// compared to how long critical sections are usually held, so spinning briefly
+// first reduces the latency of contended critical sections.
+constexpr uint32_t kDefaultCriticalSectionSpinCount = 4096;
+
 void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   if (!cs.guest_address()) {
     XELOGE("Null critical section in RtlEnterCriticalSection!");
@@ -601,6 +620,9 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   CriticalSectionPrefetchW(&cs->lock_count);
   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
   uint32_t spin_count = cs->header.absolute * 256;
+  if (!spin_count) {
+    spin_count = kDefaultCriticalSectionSpinCount;
+  }
 
   if (cs->owning_thread == cur_thread) {
     // We already own the lock.
@@ -609,14 +631,17 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
-  // Spin loop
+  // Spin loop. Only attempt to acquire when the critical section appears free
+  // to avoid contention on its cache line while it's held.
   while (spin_count--) {
-    if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
+    if (*reinterpret_cast<volatile int32_t*>(&cs->lock_count) == -1 &&
+        xe::atomic_cas(-1, 0, &cs->lock_count)) {
       // Acquired.
       cs->owning_thread = cur_thread;
       cs->recursion_count = 1;
       return;
     }
+    CriticalSectionSpinPause();
   }
 
   if (xe::atomic_inc(&cs->lock_count) != 0) {
