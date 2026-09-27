@@ -9,6 +9,8 @@
 
 #include "xenia/base/clock.h"
 
+#include <algorithm>
+#include <atomic>
 #include <mutex>
 
 #include "xenia/base/assert.h"
@@ -52,17 +54,52 @@ std::pair<uint64_t, uint64_t> guest_system_time_ratio_ =
 // Computed by RecomputeGuestTickScalar.
 std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
 
-// Native guest ticks.
-uint64_t last_guest_tick_count_ = 0;
-// Remainder of the last host to guest tick conversion, carried over so that
-// frequent clock queries don't lose time when the ratio isn't an integer.
-uint64_t guest_tick_remainder_ = 0;
-// Last sampled host tick count.
-uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
+// Native guest ticks, the latest value returned by UpdateGuestClock. Exposed
+// for inline timebase reads in generated code.
+std::atomic<uint64_t> last_guest_tick_count_{0};
+static_assert(std::atomic<uint64_t>::is_always_lock_free &&
+                  sizeof(last_guest_tick_count_) == sizeof(uint64_t),
+              "The guest tick count must be readable as a uint64_t");
+
+// The guest tick count is computed as
+// guest_base + (host_tick_count - host_base) * ratio.first / ratio.second,
+// which only needs synchronization when the ratio changes. The parameters are
+// changed with tick_mutex_ locked, and read without locking with a sequence
+// lock, as the guest reads the timebase very frequently from many threads.
+std::atomic<uint32_t> guest_clock_sequence_{0};
+std::atomic<uint64_t> guest_clock_host_base_{Clock::QueryHostTickCount()};
+std::atomic<uint64_t> guest_clock_guest_base_{0};
+std::atomic<uint64_t> guest_clock_ratio_first_{1};
+std::atomic<uint64_t> guest_clock_ratio_second_{1};
+
+// value * numerator / denominator without overflowing in the intermediate
+// product as long as the result and remainder * numerator fit.
+static uint64_t MulDiv(uint64_t value, uint64_t numerator,
+                       uint64_t denominator) {
+  return value / denominator * numerator +
+         value % denominator * numerator / denominator;
+}
+
+static uint64_t ComputeGuestTickCount(uint64_t host_tick_count) {
+  uint64_t host_base, guest_base, ratio_first, ratio_second;
+  uint32_t sequence;
+  do {
+    sequence = guest_clock_sequence_.load(std::memory_order_acquire);
+    host_base = guest_clock_host_base_.load(std::memory_order_relaxed);
+    guest_base = guest_clock_guest_base_.load(std::memory_order_relaxed);
+    ratio_first = guest_clock_ratio_first_.load(std::memory_order_relaxed);
+    ratio_second = guest_clock_ratio_second_.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+  } while ((sequence & 1) ||
+           sequence != guest_clock_sequence_.load(std::memory_order_relaxed));
+  uint64_t host_delta =
+      host_tick_count > host_base ? host_tick_count - host_base : 0;
+  return guest_base + MulDiv(host_delta, ratio_first, ratio_second);
+}
 
 using tick_mutex_type = std::mutex;
 
-// Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
+// Mutex serializing changes of the guest clock parameters.
 // std::mutex tick_mutex_;
 static tick_mutex_type tick_mutex_;
 
@@ -91,7 +128,17 @@ void RecomputeGuestTickScalar() {
 
   std::lock_guard<tick_mutex_type> lock(tick_mutex_);
   guest_tick_ratio_ = frac;
-  guest_tick_remainder_ = 0;
+  // Continue from the current guest tick count with the new ratio.
+  uint64_t host_tick_count = Clock::QueryHostTickCount();
+  uint64_t guest_tick_count = ComputeGuestTickCount(host_tick_count);
+  uint32_t sequence = guest_clock_sequence_.load(std::memory_order_relaxed);
+  guest_clock_sequence_.store(sequence + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  guest_clock_host_base_.store(host_tick_count, std::memory_order_relaxed);
+  guest_clock_guest_base_.store(guest_tick_count, std::memory_order_relaxed);
+  guest_clock_ratio_first_.store(frac.first, std::memory_order_relaxed);
+  guest_clock_ratio_second_.store(frac.second, std::memory_order_relaxed);
+  guest_clock_sequence_.store(sequence + 2, std::memory_order_release);
 }
 
 // Update the guest timer for all threads.
@@ -104,24 +151,15 @@ uint64_t UpdateGuestClock() {
     return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
   }
 
-  std::unique_lock<tick_mutex_type> lock(tick_mutex_, std::defer_lock);
-  if (lock.try_lock()) {
-    // Translate host tick count to guest tick count.
-    uint64_t host_tick_delta = host_tick_count > last_host_tick_count_
-                                   ? host_tick_count - last_host_tick_count_
-                                   : 0;
-    last_host_tick_count_ = host_tick_count;
-    uint64_t guest_tick_scaled =
-        host_tick_delta * guest_tick_ratio_.first + guest_tick_remainder_;
-    uint64_t guest_tick_delta = guest_tick_scaled / guest_tick_ratio_.second;
-    guest_tick_remainder_ = guest_tick_scaled % guest_tick_ratio_.second;
-    last_guest_tick_count_ += guest_tick_delta;
-    return last_guest_tick_count_;
-  } else {
-    // Wait until another thread has finished updating the clock.
-    lock.lock();
-    return last_guest_tick_count_;
+  uint64_t guest_tick_count = ComputeGuestTickCount(host_tick_count);
+  // Publish the value for inline reads, without ever going backwards when
+  // multiple threads race.
+  uint64_t last = last_guest_tick_count_.load(std::memory_order_relaxed);
+  while (last < guest_tick_count &&
+         !last_guest_tick_count_.compare_exchange_weak(
+             last, guest_tick_count, std::memory_order_relaxed)) {
   }
+  return std::max(last, guest_tick_count);
 }
 
 // Offset of the current guest system file time relative to the guest base time.
@@ -187,7 +225,10 @@ uint64_t Clock::QueryGuestTickCount() {
   return guest_tick_count;
 }
 
-uint64_t* Clock::GetGuestTickCountPointer() { return &last_guest_tick_count_; }
+uint64_t* Clock::GetGuestTickCountPointer() {
+  // Only read by generated code, which doesn't use std::atomic.
+  return reinterpret_cast<uint64_t*>(&last_guest_tick_count_);
+}
 uint64_t Clock::QueryGuestSystemTime() {
   if (cvars::clock_no_scaling) {
     return Clock::QueryHostSystemTime();
