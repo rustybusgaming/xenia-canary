@@ -263,7 +263,7 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   QueueControllerUpdate();
 
-  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -286,7 +286,7 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
-  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -309,7 +309,7 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
-  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -382,7 +382,7 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
   QueueControllerUpdate();
 
-  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
     auto controller = GetControllerState(user_index);
@@ -476,7 +476,7 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
   SDLJoysticksLock joysticks_lock;
-  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
 
   // Event queue should never be (this) full
   assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
@@ -807,7 +807,8 @@ void SDLInputDriver::QueueControllerUpdate() {
       SDL_PumpEvents();
       {
         SDLJoysticksLock joysticks_lock;
-        std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+        std::lock_guard<std::recursive_mutex> controllers_lock(
+            controllers_mutex_);
         for (ControllerState& controller : controllers_) {
           if (!controller.sdl) {
             continue;

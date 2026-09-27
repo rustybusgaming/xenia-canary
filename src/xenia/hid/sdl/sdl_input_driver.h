@@ -92,7 +92,9 @@ class SDLInputDriver final : public InputDriver {
   // Protects controllers_ and keystroke_states_. Guest threads only access the
   // state copied into them and never call SDL functions, which are only
   // called with SDL's joystick lock held before this mutex is locked.
-  std::mutex controllers_mutex_;
+  // Recursive as SDL functions called with it locked may synchronously invoke
+  // the event watch callback in the same thread.
+  std::recursive_mutex controllers_mutex_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
 };
