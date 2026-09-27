@@ -8,6 +8,9 @@
 */
 
 #include <array>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "xenia/base/threading.h"
 
@@ -395,6 +398,81 @@ TEST_CASE("Reset Event", "[event]") {
   evt->Set();
   result = Wait(evt.get(), false, 50ms);
   REQUIRE(result == WaitResult::kSuccess);
+}
+
+TEST_CASE("Pulse Event", "[event]") {
+  // Waiters must be released by a pulse even if they only wake up after the
+  // pulse is over.
+  SECTION("Manual reset releases all waiters") {
+    auto evt = Event::CreateManualResetEvent(false);
+    REQUIRE(evt);
+    std::atomic<int> released{0};
+    std::vector<std::thread> waiters;
+    for (int i = 0; i < 3; ++i) {
+      waiters.emplace_back([&evt, &released] {
+        if (Wait(evt.get(), false, 2000ms) == WaitResult::kSuccess) {
+          ++released;
+        }
+      });
+    }
+    std::this_thread::sleep_for(100ms);
+    evt->Pulse();
+    for (auto& waiter : waiters) {
+      waiter.join();
+    }
+    REQUIRE(released == 3);
+    // The event is left nonsignaled.
+    REQUIRE(Wait(evt.get(), false, 50ms) == WaitResult::kTimeout);
+  }
+
+  SECTION("Auto reset releases one waiter") {
+    auto evt = Event::CreateAutoResetEvent(false);
+    REQUIRE(evt);
+    std::atomic<int> released{0};
+    std::vector<std::thread> waiters;
+    for (int i = 0; i < 2; ++i) {
+      waiters.emplace_back([&evt, &released] {
+        if (Wait(evt.get(), false, 2000ms) == WaitResult::kSuccess) {
+          ++released;
+        }
+      });
+    }
+    std::this_thread::sleep_for(100ms);
+    evt->Pulse();
+    std::this_thread::sleep_for(100ms);
+    REQUIRE(released == 1);
+    evt->Pulse();
+    for (auto& waiter : waiters) {
+      waiter.join();
+    }
+    REQUIRE(released == 2);
+  }
+
+  SECTION("Pulse without waiters") {
+    auto evt = Event::CreateManualResetEvent(false);
+    REQUIRE(evt);
+    evt->Pulse();
+    REQUIRE(Wait(evt.get(), false, 50ms) == WaitResult::kTimeout);
+    evt->Set();
+    evt->Pulse();
+    REQUIRE(Wait(evt.get(), false, 50ms) == WaitResult::kTimeout);
+  }
+
+  SECTION("Wait any is released by a pulse") {
+    auto evt0 = Event::CreateAutoResetEvent(false);
+    auto evt1 = Event::CreateAutoResetEvent(false);
+    REQUIRE(evt0);
+    REQUIRE(evt1);
+    std::pair<WaitResult, size_t> result;
+    std::thread waiter(
+        [&] { result = WaitAny({evt0.get(), evt1.get()}, false, 2000ms); });
+    std::this_thread::sleep_for(100ms);
+    evt1->Pulse();
+    waiter.join();
+    REQUIRE(result.first == WaitResult::kSuccess);
+    REQUIRE(result.second == 1);
+    REQUIRE(Wait(evt1.get(), false, 50ms) == WaitResult::kTimeout);
+  }
 }
 
 TEST_CASE("Wait on Multiple Events", "[event]") {
