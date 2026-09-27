@@ -244,3 +244,37 @@ TEST_CASE("STORE_OFFSET_I32_CROSSES_0xE0000000", "[instr]") {
         test.memory->LookupHeap(0xE0000000)->Release(0xE0000000);
       });
 }
+
+// Kernel exports access guest memory through PPCContext::TranslateVirtual. It
+// must agree with the address translation of the generated code, including the
+// 0xE0000000+ host address offset, or data passed between the guest and the
+// kernel through such memory is lost.
+TEST_CASE("PPC_CONTEXT_TRANSLATE_VIRTUAL_MATCHES_0xE0000000", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto addr = LoadGPR(b, 4);
+    auto val = b.Truncate(LoadGPR(b, 5), INT32_TYPE);
+    b.Store(addr, val);
+    b.Return();
+  });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        auto heap = test.memory->LookupHeap(0xE0000000);
+        REQUIRE(
+            heap->AllocFixed(0xE0000000, 0x2000, 0x1000,
+                             kMemoryAllocationReserve | kMemoryAllocationCommit,
+                             kMemoryProtectRead | kMemoryProtectWrite));
+        std::memset(test.memory->TranslateVirtual(0xE0000000), 0, 0x2000);
+        REQUIRE(ctx->TranslateVirtual<uint8_t*>(0xE0000718) ==
+                test.memory->TranslateVirtual(0xE0000718));
+        REQUIRE(ctx->HostToGuestVirtual(
+                    test.memory->TranslateVirtual(0xE0000718)) == 0xE0000718);
+        ctx->r[4] = 0xE0000718u;
+        ctx->r[5] = 0x11223344;
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t result;
+        std::memcpy(&result, ctx->TranslateVirtual<uint8_t*>(0xE0000718), 4);
+        REQUIRE(result == 0x11223344);
+        test.memory->LookupHeap(0xE0000000)->Release(0xE0000000);
+      });
+}

@@ -11,3 +11,20 @@
 
 DEFINE_bool(guide_button, true, "Forward guide button presses to guest.",
             "HID");
+DEFINE_string(
+    controller_type, "auto",
+    "Type of controller reported to games for SDL controllers. \"auto\" "
+    "reports the type detected by SDL. Set it to \"gamepad\", \"guitar\", "
+    "\"guitar_alternate\", \"guitar_bass\", \"drum_kit\", \"wheel\", "
+    "\"arcade_stick\", \"flight_stick\", \"dance_pad\" or \"arcade_pad\" "
+    "for controllers detected as another type, such as guitars connected "
+    "through a dongle presenting them as a gamepad.",
+    "HID");
+
+namespace xe {
+namespace hid {
+void SetControllerTypeCvar(const std::string& controller_type) {
+  OVERRIDE_string(controller_type, controller_type);
+}
+}  // namespace hid
+}  // namespace xe

@@ -219,6 +219,19 @@ class EmulatorWindow {
     EmulatorWindow& emulator_window_;
   };
 
+  class ControllerTypeDialog final : public ui::ImGuiDialog {
+   public:
+    ControllerTypeDialog(ui::ImGuiDrawer* imgui_drawer,
+                         EmulatorWindow& emulator_window)
+        : ui::ImGuiDialog(imgui_drawer), emulator_window_(emulator_window) {}
+
+   protected:
+    void OnDraw(ImGuiIO& io) override;
+
+   private:
+    EmulatorWindow& emulator_window_;
+  };
+
   class XMPConfigDialog final : public ui::ImGuiDialog {
    public:
     XMPConfigDialog(ui::ImGuiDrawer* imgui_drawer,
@@ -281,6 +294,7 @@ class EmulatorWindow {
   void GpuClearCaches();
   void ToggleDisplayConfigDialog();
   void ToggleControllerVibration();
+  void ToggleControllerTypeDialog();
   void ShowCompatibility();
   void ShowFAQ();
   void ShowBuildCommit();
@@ -327,6 +341,7 @@ class EmulatorWindow {
   // messages back to guest.
   std::unique_ptr<ProfileConfigDialog> profile_config_dialog_;
 
+  std::unique_ptr<ControllerTypeDialog> controller_type_dialog_;
   std::unique_ptr<XMPConfigDialog> xmp_config_dialog_;
 
   std::vector<RecentTitleEntry> recently_launched_titles_;

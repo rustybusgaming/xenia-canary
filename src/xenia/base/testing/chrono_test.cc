@@ -9,6 +9,13 @@
 
 #include "xenia/base/chrono.h"
 
+#include <atomic>
+#include <cmath>
+#include <thread>
+#include <vector>
+
+#include "xenia/base/clock.h"
+
 #define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
 
@@ -143,6 +150,50 @@ TEST_CASE("WinSystemClock <-> steady_clock", "[clock_cast]") {
     auto duration = dur_bound(sty_clock::now() - start).count();
     auto error = std::abs((sty2 - sty).count());
     REQUIRE(error <= duration);
+  }
+}
+
+TEST_CASE("Guest tick count", "[clock]") {
+  using namespace std::chrono_literals;
+  Clock::set_guest_tick_frequency(50000000);
+  Clock::set_guest_time_scalar(1.0);
+
+  SECTION("advances at the guest tick frequency") {
+    uint64_t start_ticks = Clock::QueryGuestTickCount();
+    auto start = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(100ms);
+    uint64_t end_ticks = Clock::QueryGuestTickCount();
+    double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+    double expected_ticks = seconds * 50000000.0;
+    REQUIRE(end_ticks > start_ticks);
+    // Allow for the time between the clock reads and the steady clock reads.
+    REQUIRE(std::abs(double(end_ticks - start_ticks) - expected_ticks) <
+            expected_ticks * 0.1);
+  }
+
+  SECTION("never goes backwards across threads and scalar changes") {
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) {
+      threads.emplace_back([&failed] {
+        uint64_t last = 0;
+        for (int j = 0; j < 20000; ++j) {
+          uint64_t ticks = Clock::QueryGuestTickCount();
+          if (ticks < last) {
+            failed = true;
+          }
+          last = ticks;
+        }
+      });
+    }
+    Clock::set_guest_time_scalar(2.0);
+    Clock::set_guest_time_scalar(1.0);
+    for (auto& thread : threads) {
+      thread.join();
+    }
+    REQUIRE_FALSE(failed);
   }
 }
 

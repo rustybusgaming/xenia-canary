@@ -32,6 +32,10 @@ class AudioSystem {
   static constexpr size_t kMaximumQueuedFrames = 64;
   static constexpr uint32_t kAudioPumpInterval = 5333u;
   static constexpr uint32_t kAudioIntervalSlack = 400u;
+  // How many pump intervals a client may fall behind and still catch up with,
+  // which is also how many frames are buffered ahead when a client starts or
+  // after a stall, to absorb late guest callbacks.
+  static constexpr uint32_t kAudioMaxCatchUpIntervals = 3u;
 
   virtual ~AudioSystem();
 

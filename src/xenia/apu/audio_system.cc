@@ -129,8 +129,18 @@ void AudioSystem::WorkerThreadMain() {
         const uint64_t min_us =
             scalar > 0.0 ? static_cast<uint64_t>(kAudioPumpInterval / scalar)
                          : kAudioPumpInterval;
-        clients_[client_index].next_pump_us =
-            (earliest_pump_us > now ? earliest_pump_us : now) + min_us;
+        // Schedule from the missed deadline rather than from now when late,
+        // so frames the guest was late with are caught up with instead of
+        // being lost, which drains the host queue and makes audio drop out.
+        // Only catch up with a limited number of intervals though, not to
+        // burst after long stalls.
+        uint64_t next_pump_us = earliest_pump_us + min_us;
+        const uint64_t max_catch_up_us =
+            uint64_t(kAudioMaxCatchUpIntervals) * min_us;
+        if (now > max_catch_up_us && next_pump_us < now - max_catch_up_us) {
+          next_pump_us = now - max_catch_up_us;
+        }
+        clients_[client_index].next_pump_us = next_pump_us;
       }
     }
 

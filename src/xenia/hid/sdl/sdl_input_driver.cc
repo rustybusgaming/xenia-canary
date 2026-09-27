@@ -9,6 +9,9 @@
 
 #include "xenia/hid/sdl/sdl_input_driver.h"
 
+#include <string_view>
+#include <utility>
+
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
@@ -30,6 +33,68 @@ DEFINE_path(mappings_file, "gamecontrollerdb.txt",
 namespace xe {
 namespace hid {
 namespace sdl {
+
+namespace {
+X_INPUT_DEVSUBTYPE GetXInputSubType(SDL_Joystick* joystick) {
+  static constexpr std::pair<std::string_view, X_INPUT_DEVSUBTYPE>
+      kNamedSubTypes[] = {
+          {"gamepad", XINPUT_DEVSUBTYPE_GAMEPAD},
+          {"wheel", XINPUT_DEVSUBTYPE_WHEEL},
+          {"arcade_stick", XINPUT_DEVSUBTYPE_ARCADE_STICK},
+          {"flight_stick", XINPUT_DEVSUBTYPE_FLIGHT_STICK},
+          {"dance_pad", XINPUT_DEVSUBTYPE_DANCE_PAD},
+          {"guitar", XINPUT_DEVSUBTYPE_GUITAR},
+          {"guitar_alternate", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE},
+          {"drum_kit", XINPUT_DEVSUBTYPE_DRUM_KIT},
+          {"guitar_bass", XINPUT_DEVSUBTYPE_GUITAR_BASS},
+          {"arcade_pad", XINPUT_DEVSUBTYPE_ARCADE_PAD},
+      };
+  if (cvars::controller_type != "auto") {
+    for (const auto& [name, sub_type] : kNamedSubTypes) {
+      if (cvars::controller_type == name) {
+        return sub_type;
+      }
+    }
+    static bool unknown_type_logged = false;
+    if (!unknown_type_logged) {
+      unknown_type_logged = true;
+      XELOGW("SDL: Unknown controller_type \"{}\", using the detected type",
+             cvars::controller_type);
+    }
+  }
+  // SDL's joystick types don't have the same values as the XInput subtypes.
+  switch (SDL_JoystickGetType(joystick)) {
+    case SDL_JOYSTICK_TYPE_WHEEL:
+      return XINPUT_DEVSUBTYPE_WHEEL;
+    case SDL_JOYSTICK_TYPE_ARCADE_STICK:
+      return XINPUT_DEVSUBTYPE_ARCADE_STICK;
+    case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
+      return XINPUT_DEVSUBTYPE_FLIGHT_STICK;
+    case SDL_JOYSTICK_TYPE_DANCE_PAD:
+      return XINPUT_DEVSUBTYPE_DANCE_PAD;
+    case SDL_JOYSTICK_TYPE_GUITAR:
+      return XINPUT_DEVSUBTYPE_GUITAR;
+    case SDL_JOYSTICK_TYPE_DRUM_KIT:
+      return XINPUT_DEVSUBTYPE_DRUM_KIT;
+    case SDL_JOYSTICK_TYPE_ARCADE_PAD:
+      return XINPUT_DEVSUBTYPE_ARCADE_PAD;
+    default:
+      return XINPUT_DEVSUBTYPE_GAMEPAD;
+  }
+}
+
+// Controllers are added, removed and updated from SDL event watch callbacks,
+// which may run on any thread pumping SDL events, and SDL may invoke them with
+// its joystick lock held. To keep a single lock order, SDL's joystick lock is
+// always taken before controllers_mutex_ where both are needed.
+class SDLJoysticksLock {
+ public:
+  SDLJoysticksLock() { SDL_LockJoysticks(); }
+  ~SDLJoysticksLock() { SDL_UnlockJoysticks(); }
+  SDLJoysticksLock(const SDLJoysticksLock&) = delete;
+  SDLJoysticksLock& operator=(const SDLJoysticksLock&) = delete;
+};
+}  // namespace
 
 SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order),
@@ -198,15 +263,15 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   QueueControllerUpdate();
 
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Unfortunately drivers can't present all information immediately (e.g.
-  // battery information) so this needs to be refreshed every time.
-  UpdateXCapabilities(*controller);
-
+  // battery information), so the capabilities are refreshed whenever SDL
+  // events are pumped.
   std::memcpy(out_caps, &controller->caps, sizeof(*out_caps));
 
   return X_ERROR_SUCCESS;
@@ -221,6 +286,7 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -243,21 +309,17 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-#if SDL_VERSION_ATLEAST(2, 0, 9)
-  if (SDL_GameControllerRumble(controller->sdl, vibration->left_motor_speed,
-                               vibration->right_motor_speed, 0)) {
-    return X_ERROR_FUNCTION_FAILED;
-  } else {
-    return X_ERROR_SUCCESS;
-  }
-#else
+  // Applied in the thread pumping SDL events, not to call SDL functions from
+  // guest threads.
+  controller->vibration = *vibration;
+  controller->vibration_changed = true;
   return X_ERROR_SUCCESS;
-#endif
 }
 
 X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
@@ -320,6 +382,7 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
   QueueControllerUpdate();
 
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
     auto controller = GetControllerState(user_index);
@@ -412,6 +475,8 @@ InputType SDLInputDriver::GetInputType() const { return InputType::Controller; }
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
+  SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::recursive_mutex> controllers_lock(controllers_mutex_);
 
   // Event queue should never be (this) full
   assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
@@ -533,7 +598,11 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
 
 void SDLInputDriver::OnControllerDeviceAxisMotion(const SDL_Event& event) {
   auto idx = GetControllerIndexFromInstanceID(event.caxis.which);
-  assert(idx);
+  if (!idx) {
+    // An event for a controller that has been removed, or that was ignored
+    // because all slots were taken.
+    return;
+  }
   auto& pad = controllers_.at(*idx).state.gamepad;
   switch (event.caxis.axis) {
     case SDL_CONTROLLER_AXIS_LEFTX:
@@ -599,7 +668,11 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   static_assert(SDL_CONTROLLER_BUTTON_DPAD_RIGHT == 14);
 
   auto idx = GetControllerIndexFromInstanceID(event.cbutton.which);
-  assert(idx);
+  if (!idx) {
+    // An event for a controller that has been removed, or that was ignored
+    // because all slots were taken.
+    return;
+  }
   auto& controller = controllers_.at(*idx);
 
   uint16_t xbuttons = controller.state.gamepad.buttons;
@@ -709,8 +782,8 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
 
   auto& c = state.caps;
   c.type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
-  c.sub_type = static_cast<uint8_t>(SDL_JoystickGetType(
-      SDL_GameControllerGetJoystick(state.sdl)));  // XINPUT_DEVSUBTYPE_GAMEPAD
+  c.sub_type = static_cast<uint8_t>(
+      GetXInputSubType(SDL_GameControllerGetJoystick(state.sdl)));
   c.flags = cap_flags;
   c.gamepad.buttons =
       0xF3FF | (cvars::guide_button ? X_INPUT_GAMEPAD_GUIDE : 0x0);
@@ -732,6 +805,25 @@ void SDLInputDriver::QueueControllerUpdate() {
   if (!is_queued) {
     window()->app_context().CallInUIThread([this]() {
       SDL_PumpEvents();
+      {
+        SDLJoysticksLock joysticks_lock;
+        std::lock_guard<std::recursive_mutex> controllers_lock(
+            controllers_mutex_);
+        for (ControllerState& controller : controllers_) {
+          if (!controller.sdl) {
+            continue;
+          }
+          UpdateXCapabilities(controller);
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+          if (controller.vibration_changed) {
+            controller.vibration_changed = false;
+            SDL_GameControllerRumble(controller.sdl,
+                                     controller.vibration.left_motor_speed,
+                                     controller.vibration.right_motor_speed, 0);
+          }
+#endif
+        }
+      }
       sdl_pumpevents_queued_ = false;
     });
   }

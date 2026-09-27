@@ -87,6 +87,10 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   // environment. Xenia creates many pipelines while games are running, let
   // Metal use more threads for compiling them to reduce stuttering.
   setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
+  // Encoding the Metal commands of a submission takes a large part of the
+  // frame, let MoltenVK do it in its own dispatch queue so the command
+  // processor can continue processing guest commands meanwhile.
+  setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
   for (const char* loader_library_name : kLoaderLibraryNames) {
     vulkan_instance->loader_ =
         dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);

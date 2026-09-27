@@ -35,6 +35,7 @@
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -684,6 +685,58 @@ void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
   ImGui::End();
 }
 
+void EmulatorWindow::ControllerTypeDialog::OnDraw(ImGuiIO& io) {
+  ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+
+  bool dialog_open = true;
+  if (!ImGui::Begin(
+          "Controller Type", &dialog_open,
+          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::End();
+    return;
+  }
+
+  static constexpr std::pair<const char*, const char*> kControllerTypes[] = {
+      {"auto", "Automatic (as detected)"},
+      {"gamepad", "Gamepad"},
+      {"guitar", "Guitar"},
+      {"guitar_alternate", "Guitar (alternate, used by Guitar Hero)"},
+      {"guitar_bass", "Bass guitar"},
+      {"drum_kit", "Drum kit"},
+      {"wheel", "Wheel"},
+      {"arcade_stick", "Arcade stick"},
+      {"flight_stick", "Flight stick"},
+      {"dance_pad", "Dance pad"},
+      {"arcade_pad", "Arcade pad"},
+  };
+
+  ImGui::TextUnformatted("Type of controller reported to games:");
+  for (const auto& [value, label] : kControllerTypes) {
+    if (ImGui::RadioButton(label, cvars::controller_type == value) &&
+        cvars::controller_type != value) {
+      hid::SetControllerTypeCvar(value);
+    }
+  }
+  ImGui::Separator();
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
+  ImGui::TextUnformatted(
+      "Use a guitar or Drum kit for instrument controllers that are detected "
+      "as a gamepad, for example when connected through a wireless dongle. "
+      "Guitar Hero games expect the alternate guitar type. "
+      "Some games only check the controller type when it connects, so "
+      "reconnect the controller or restart the game if the change isn't "
+      "picked up.");
+  ImGui::PopTextWrapPos();
+
+  ImGui::End();
+
+  if (!dialog_open) {
+    Close();
+    emulator_window_.controller_type_dialog_.release();
+    return;
+  }
+}
+
 void EmulatorWindow::XMPConfigDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(20, 20), ImGuiCond_FirstUseEver);
@@ -885,6 +938,9 @@ bool EmulatorWindow::Initialize() {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Toggle controller vibration", "",
         std::bind(&EmulatorWindow::ToggleControllerVibration, this)));
+    hid_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Controller t&ype...", "",
+        std::bind(&EmulatorWindow::ToggleControllerTypeDialog, this)));
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Display controller hotkeys", "",
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
@@ -1684,6 +1740,15 @@ void EmulatorWindow::ToggleProfilesConfigDialog() {
       profile_config_dialog_.reset();
     }
     emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+  }
+}
+
+void EmulatorWindow::ToggleControllerTypeDialog() {
+  if (!controller_type_dialog_) {
+    controller_type_dialog_ =
+        std::make_unique<ControllerTypeDialog>(imgui_drawer_.get(), *this);
+  } else {
+    controller_type_dialog_.reset();
   }
 }
 
