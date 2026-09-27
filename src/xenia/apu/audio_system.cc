@@ -45,8 +45,6 @@ AudioSystem::AudioSystem(cpu::Processor* processor)
     : memory_(processor->memory()),
       processor_(processor),
       worker_running_(false) {
-  std::memset(clients_, 0, sizeof(clients_));
-
   for (size_t i = 0; i < kMaximumClientCount; ++i) {
     client_semaphores_[i] =
         xe::threading::Semaphore::Create(0, kMaximumQueuedFrames);

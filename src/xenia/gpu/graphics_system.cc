@@ -127,12 +127,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                     : 1.0;
             uint64_t last_frame_time = Clock::QueryGuestTickCount();
     // Sleep for 90% of the vblank duration on Windows, spin for 10%
-    // Linux uses full sleep duration due to scheduler quantum issues
+    // Other platforms use full sleep duration due to scheduler quantum issues
 #if XE_PLATFORM_WIN32
             constexpr double duration_scalar = 0.90;
-#endif
-#if XE_PLATFORM_LINUX
-            constexpr double duration_scalar = 1.0;
 #endif
 
             while (frame_limiter_worker_running_) {
@@ -180,9 +177,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                   xe::threading::Sleep(std::chrono::milliseconds(1));
                 }
               }
-#endif
-#if XE_PLATFORM_LINUX
-              // Linux: Use simplified timing logic to avoid oversleeping
+#else
+              // Other platforms (Linux, macOS): Use simplified timing logic to
+              // avoid oversleeping
               MarkVblank();
 
               if (cvars::vsync || normalized_framerate_limit > 0) {

@@ -593,6 +593,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
            Shader::IsHostVertexShaderTypeDomain(
                GetSpirvShaderModification().vertex.host_vertex_shader_type);
   }
+  // Without geometry shaders, rectangles are expanded in the vertex shader.
+  // The translated guest shader is then a function called for each of the 3
+  // guest vertices of the rectangle, and the entry point builds the host vertex
+  // of the two-triangle strip from their outputs.
+  bool IsSpirvRectangleListVertexShader() const {
+    return is_vertex_shader() &&
+           GetSpirvShaderModification().vertex.host_vertex_shader_type ==
+               Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  }
   bool IsSpirvComputeShader() const {
     return is_vertex_shader() &&
            GetSpirvShaderModification().vertex.host_vertex_shader_type ==
@@ -665,6 +674,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   void StartVertexOrTessEvalShaderBeforeMain();
   void StartVertexOrTessEvalShaderInMain();
   void CompleteVertexOrTessEvalShaderInMain();
+  // Creates the entry point calling the guest vertex shader function for the 3
+  // vertices of the rectangle and writing the outputs for the host vertex.
+  spv::Function* MakeRectangleListVertexShaderEntryPoint();
 
   void StartFragmentShaderBeforeMain();
   void StartFragmentShaderInMain();
@@ -1121,6 +1133,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
   std::vector<spv::Id> main_interface_;
   spv::Function* function_main_;
+  // For kRectangleListAsTriangleStrip, the uint parameter of the guest vertex
+  // function (function_main_ until the entry point calling it is created) -
+  // the index of the guest vertex in the rectangle.
+  spv::Id main_rectangle_vertex_index_;
   spv::Id main_system_constant_flags_;
   // bool.
   spv::Id var_main_predicate_;

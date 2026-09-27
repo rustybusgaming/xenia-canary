@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 # Must be set before project() to take effect. Ignored on non-Apple platforms.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "Minimum macOS version")
 if(APPLE)
-  project(xenia LANGUAGES C CXX OBJCXX)
+  # OBJC is needed for SDL2's .m sources - otherwise they may be built as
+  # Objective-C++ with the C++ standard flags.
+  project(xenia LANGUAGES C CXX OBJC OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 20)
   set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 else()

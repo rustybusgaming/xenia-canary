@@ -331,7 +331,10 @@ TEST_CASE("Wait on Multiple Handles", "[wait]") {
   REQUIRE(any_result.first == WaitResult::kSuccess);
   REQUIRE(any_result.second == 0);
 
-  auto all_result = WaitAll(handles, false, 100ms);
+  // Needs the thread to finish its two 25ms waits. Leave plenty of headroom
+  // for scheduling delays on loaded machines (such as CI virtual machines), as
+  // the thread would outlive the handles it uses if this timed out.
+  auto all_result = WaitAll(handles, false, 1000ms);
   REQUIRE(all_result == WaitResult::kSuccess);
 }
 
@@ -875,7 +878,8 @@ TEST_CASE("Wait on Multiple Timers", "[timer]") {
   all_result = WaitAll({timer0.get(), timer1.get()}, false, 100ms);
   REQUIRE(all_result == WaitResult::kSuccess);
   REQUIRE(timer0->SetOnceAfter(1ms));
-  Sleep(2ms);
+  // Give the timer enough time to fire even if the thread is descheduled.
+  Sleep(100ms);
   any_result = WaitAny({timer0.get(), timer1.get()}, false, 100ms);
   REQUIRE(any_result.first == WaitResult::kSuccess);
   REQUIRE(any_result.second == 0);
@@ -1009,6 +1013,10 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   WaitResult result;
   Thread::CreationParameters params = {};
   auto func = [] { Sleep(20ms); };
+  // For waiting for a running thread to finish. Generous to tolerate
+  // scheduling delays on loaded machines (such as CI virtual machines), as the
+  // thread would outlive the Thread object if the wait timed out.
+  constexpr auto kFinishTimeout = 1000ms;
 
   // Create initially suspended
   params.create_suspended = true;
@@ -1016,7 +1024,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
   params.create_suspended = false;
 
@@ -1026,7 +1034,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 
   // Test recursive suspend
@@ -1039,7 +1047,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   result = threading::Wait(thread.get(), false, 50ms);
   REQUIRE(result == threading::WaitResult::kTimeout);
   thread->Resume();
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 
   // Test suspend count
@@ -1061,7 +1069,7 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   REQUIRE(suspend_count == 0);
   thread->Resume(&suspend_count);
   REQUIRE(suspend_count == 1);
-  result = threading::Wait(thread.get(), false, 50ms);
+  result = threading::Wait(thread.get(), false, kFinishTimeout);
   REQUIRE(result == threading::WaitResult::kSuccess);
 }
 

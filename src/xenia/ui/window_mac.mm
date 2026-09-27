@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <string_view>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
@@ -548,6 +550,65 @@ NSMenuItem* CreateApplicationMenuItem() {
   return app_menu_item;
 }
 
+// Converts a Windows-style hotkey description ("Ctrl+O", "F11", "Alt+F4") to
+// a key equivalent, with the Mac conventions for the modifiers (Ctrl as
+// Command) and for closing (Alt+F4 as Command+W). Returns false if it can't be
+// represented.
+bool ToKeyEquivalent(const std::string& hotkey, NSString** key_out,
+                     NSEventModifierFlags* modifiers_out) {
+  if (hotkey == "Alt+F4") {
+    *key_out = @"w";
+    *modifiers_out = NSEventModifierFlagCommand;
+    return true;
+  }
+  NSEventModifierFlags modifiers = 0;
+  std::string_view remaining = hotkey;
+  while (true) {
+    size_t plus = remaining.find('+');
+    // A trailing "+" is the key itself, as in "Ctrl++".
+    if (plus == std::string_view::npos || plus + 1 == remaining.size()) {
+      break;
+    }
+    std::string_view modifier = remaining.substr(0, plus);
+    if (modifier == "Ctrl") {
+      modifiers |= NSEventModifierFlagCommand;
+    } else if (modifier == "Alt") {
+      modifiers |= NSEventModifierFlagOption;
+    } else if (modifier == "Shift") {
+      modifiers |= NSEventModifierFlagShift;
+    } else {
+      return false;
+    }
+    remaining.remove_prefix(plus + 1);
+  }
+  if (remaining.size() == 1) {
+    char c = remaining[0];
+    if (c >= 'A' && c <= 'Z') {
+      c = char(c - 'A' + 'a');
+    }
+    *key_out = [NSString stringWithFormat:@"%c", c];
+    *modifiers_out = modifiers;
+    return true;
+  }
+  if (remaining.size() >= 2 && remaining.size() <= 3 && remaining[0] == 'F') {
+    int number = 0;
+    for (char c : remaining.substr(1)) {
+      if (c < '0' || c > '9') {
+        return false;
+      }
+      number = number * 10 + (c - '0');
+    }
+    if (number < 1 || number > 24) {
+      return false;
+    }
+    unichar function_key = unichar(NSF1FunctionKey + (number - 1));
+    *key_out = [NSString stringWithCharacters:&function_key length:1];
+    *modifiers_out = modifiers;
+    return true;
+  }
+  return false;
+}
+
 // Removes the Windows-style & mnemonic markers from a menu item title.
 NSString* ToMenuTitle(const std::string& text) {
   std::string title;
@@ -1000,8 +1061,6 @@ MacMenuItem::MacMenuItem(Type type, const std::string& text,
                          const std::string& hotkey,
                          std::function<void()> callback)
     : MenuItem(type, text, hotkey, std::move(callback)) {
-  // Hotkeys are handled by the window's key listeners rather than as key
-  // equivalents, so they would be handled twice otherwise.
   switch (type) {
     case Type::kNormal:
     default: {
@@ -1031,6 +1090,15 @@ MacMenuItem::MacMenuItem(Type type, const std::string& text,
                                                     action:@selector(activate:)
                                              keyEquivalent:@""];
       item.target = target;
+      // The menu handles the key equivalent itself, so the key event doesn't
+      // reach the window's key listeners, which handle the same hotkeys.
+      NSString* key_equivalent;
+      NSEventModifierFlags key_equivalent_modifiers;
+      if (!hotkey.empty() &&
+          ToKeyEquivalent(hotkey, &key_equivalent, &key_equivalent_modifiers)) {
+        item.keyEquivalent = key_equivalent;
+        item.keyEquivalentModifierMask = key_equivalent_modifiers;
+      }
       target_ = const_cast<void*>(CFBridgingRetain(target));
       handle_ = const_cast<void*>(CFBridgingRetain(item));
     } break;
