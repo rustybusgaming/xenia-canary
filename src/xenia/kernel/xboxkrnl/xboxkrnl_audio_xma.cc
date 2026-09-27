@@ -84,6 +84,16 @@ void StoreXmaContextIndexedRegister(KernelState* kernel_state,
   uint32_t hw_index =
       (context_physical_address - xma_decoder->context_array_ptr()) /
       sizeof(XMA_CONTEXT_DATA);
+  if (context_physical_address == UINT32_MAX ||
+      context_physical_address < xma_decoder->context_array_ptr() ||
+      hw_index >= apu::XmaDecoder::kContextCount) {
+    XELOGW(
+        "XMA: Context 0x{:08X} (physical 0x{:08X}) is not in the context "
+        "array at physical 0x{:08X}",
+        context_ptr, context_physical_address,
+        xma_decoder->context_array_ptr());
+    return;
+  }
   uint32_t reg_num = base_reg + (hw_index >> 5) * 4;
   uint32_t reg_value = 1 << (hw_index & 0x1F);
   xma_decoder->WriteRegister(reg_num, xe::byte_swap(reg_value));

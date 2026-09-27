@@ -245,7 +245,18 @@ int XmaDecoder::GetContextId(uint32_t guest_ptr) {
   static_assert_size(XMA_CONTEXT_DATA, 64);
   if (guest_ptr < context_data_first_ptr_ ||
       guest_ptr > context_data_last_ptr_) {
-    return -1;
+    // The context may be accessed through a different virtual mapping of the
+    // same physical memory.
+    uint32_t physical_address = memory()->GetPhysicalAddress(guest_ptr);
+    uint32_t context_array_physical_address = context_array_ptr();
+    if (physical_address == UINT32_MAX ||
+        physical_address < context_array_physical_address ||
+        physical_address - context_array_physical_address >=
+            sizeof(XMA_CONTEXT_DATA) * kContextCount) {
+      return -1;
+    }
+    guest_ptr = context_data_first_ptr_ +
+                (physical_address - context_array_physical_address);
   }
   assert_zero(guest_ptr & 0x3F);
   return (guest_ptr - context_data_first_ptr_) >> 6;
@@ -266,7 +277,10 @@ uint32_t XmaDecoder::AllocateContext() {
 
 void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   auto context_id = GetContextId(guest_ptr);
-  assert_true(context_id >= 0);
+  if (context_id < 0) {
+    XELOGW("XMA: Releasing an invalid context 0x{:08X}", guest_ptr);
+    return;
+  }
 
   XmaContext& context = *contexts_[context_id];
   assert_true(context.is_allocated());
@@ -276,7 +290,10 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
 
 bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {
   auto context_id = GetContextId(guest_ptr);
-  assert_true(context_id >= 0);
+  if (context_id < 0) {
+    XELOGW("XMA: Blocking on an invalid context 0x{:08X}", guest_ptr);
+    return true;
+  }
 
   XmaContext& context = *contexts_[context_id];
   return context.Block(poll);
