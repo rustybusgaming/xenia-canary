@@ -174,6 +174,13 @@ class VulkanDevice {
   // `with_swapchain` and `with_gpu_emulation` options.
   const Properties& properties() const { return properties_; }
 
+  // Whether primitive restart is always enabled for strip and fan topologies
+  // regardless of primitiveRestartEnable, as on Metal (MoltenVK), where it
+  // can't be disabled.
+  bool IsPrimitiveRestartAlwaysEnabled() const {
+    return properties_.driverID == VK_DRIVER_ID_MOLTENVK;
+  }
+
   // Enabled extensions not fully covered by the device properties and optional
   // feature flags in the `Properties` structure (primarily those adding API
   // functionality rather than GPU features). Also set to true if the version of
