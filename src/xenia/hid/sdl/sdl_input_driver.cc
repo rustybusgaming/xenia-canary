@@ -84,9 +84,9 @@ X_INPUT_DEVSUBTYPE GetXInputSubType(SDL_Joystick* joystick) {
 }
 
 // Controllers are added, removed and updated from SDL event watch callbacks,
-// which may run on any thread pumping SDL events, while guest threads access
-// them concurrently. SDL's own joystick lock is used rather than a separate
-// mutex, as SDL may invoke the event watch callbacks while holding it.
+// which may run on any thread pumping SDL events, and SDL may invoke them with
+// its joystick lock held. To keep a single lock order, SDL's joystick lock is
+// always taken before controllers_mutex_ where both are needed.
 class SDLJoysticksLock {
  public:
   SDLJoysticksLock() { SDL_LockJoysticks(); }
@@ -263,16 +263,15 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   QueueControllerUpdate();
 
-  SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Unfortunately drivers can't present all information immediately (e.g.
-  // battery information) so this needs to be refreshed every time.
-  UpdateXCapabilities(*controller);
-
+  // battery information), so the capabilities are refreshed whenever SDL
+  // events are pumped.
   std::memcpy(out_caps, &controller->caps, sizeof(*out_caps));
 
   return X_ERROR_SUCCESS;
@@ -287,7 +286,7 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
-  SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -310,22 +309,17 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
-  SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-#if SDL_VERSION_ATLEAST(2, 0, 9)
-  if (SDL_GameControllerRumble(controller->sdl, vibration->left_motor_speed,
-                               vibration->right_motor_speed, 0)) {
-    return X_ERROR_FUNCTION_FAILED;
-  } else {
-    return X_ERROR_SUCCESS;
-  }
-#else
+  // Applied in the thread pumping SDL events, not to call SDL functions from
+  // guest threads.
+  controller->vibration = *vibration;
+  controller->vibration_changed = true;
   return X_ERROR_SUCCESS;
-#endif
 }
 
 X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
@@ -388,7 +382,7 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
   QueueControllerUpdate();
 
-  SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
     auto controller = GetControllerState(user_index);
@@ -482,6 +476,7 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
   SDLJoysticksLock joysticks_lock;
+  std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
 
   // Event queue should never be (this) full
   assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
@@ -810,6 +805,24 @@ void SDLInputDriver::QueueControllerUpdate() {
   if (!is_queued) {
     window()->app_context().CallInUIThread([this]() {
       SDL_PumpEvents();
+      {
+        SDLJoysticksLock joysticks_lock;
+        std::lock_guard<std::mutex> controllers_lock(controllers_mutex_);
+        for (ControllerState& controller : controllers_) {
+          if (!controller.sdl) {
+            continue;
+          }
+          UpdateXCapabilities(controller);
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+          if (controller.vibration_changed) {
+            controller.vibration_changed = false;
+            SDL_GameControllerRumble(controller.sdl,
+                                     controller.vibration.left_motor_speed,
+                                     controller.vibration.right_motor_speed, 0);
+          }
+#endif
+        }
+      }
       sdl_pumpevents_queued_ = false;
     });
   }

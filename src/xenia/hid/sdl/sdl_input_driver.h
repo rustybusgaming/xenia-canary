@@ -52,6 +52,9 @@ class SDLInputDriver final : public InputDriver {
     X_INPUT_CAPABILITIES caps;
     X_INPUT_STATE state;
     bool state_changed;
+    // Requested by the guest, applied when SDL events are pumped.
+    X_INPUT_VIBRATION vibration;
+    bool vibration_changed;
   };
 
   enum class RepeatState {
@@ -86,6 +89,10 @@ class SDLInputDriver final : public InputDriver {
   bool sdl_gamecontroller_initialized_;
   int sdl_events_unflushed_;
   std::atomic<bool> sdl_pumpevents_queued_;
+  // Protects controllers_ and keystroke_states_. Guest threads only access the
+  // state copied into them and never call SDL functions, which are only
+  // called with SDL's joystick lock held before this mutex is locked.
+  std::mutex controllers_mutex_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
 };
