@@ -3089,6 +3089,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           pixel_shader_modification.pixel.rt0_blend_a_factor_for_premult !=
           xenos::BlendFactor::kOne;
 
+      const xenos::ColorRenderTargetFormat color_rt_formats[] = {
+          description.render_pass_key.color_0_view_format,
+          description.render_pass_key.color_1_view_format,
+          description.render_pass_key.color_2_view_format,
+          description.render_pass_key.color_3_view_format,
+      };
       uint32_t color_rts_remaining = color_rts_used;
       uint32_t color_rt_index;
       while (xe::bit_scan_forward(color_rts_remaining, &color_rt_index)) {
@@ -3097,12 +3103,42 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
             color_blend_attachments[color_rt_index];
         const PipelineRenderTarget& color_rt =
             description.render_targets[color_rt_index];
-        if (color_rt.src_color_blend_factor != PipelineBlendFactor::kOne ||
+        bool blend_enable =
+            color_rt.src_color_blend_factor != PipelineBlendFactor::kOne ||
             color_rt.dst_color_blend_factor != PipelineBlendFactor::kZero ||
             color_rt.color_blend_op != xenos::BlendOp::kAdd ||
             color_rt.src_alpha_blend_factor != PipelineBlendFactor::kOne ||
             color_rt.dst_alpha_blend_factor != PipelineBlendFactor::kZero ||
-            color_rt.alpha_blend_op != xenos::BlendOp::kAdd) {
+            color_rt.alpha_blend_op != xenos::BlendOp::kAdd;
+        if (blend_enable) {
+          // Blending must not be enabled for attachments with formats not
+          // supporting it (such as integer formats) - that's invalid usage,
+          // and some implementations (MoltenVK) ignore blending and warn.
+          xenos::ColorRenderTargetFormat color_rt_format =
+              color_rt_formats[color_rt_index];
+          VkFormat color_rt_vulkan_format =
+              description.render_pass_key.color_rts_use_transfer_formats
+                  ? render_target_cache_.GetColorOwnershipTransferVulkanFormat(
+                        color_rt_format)
+                  : render_target_cache_.GetColorVulkanFormat(color_rt_format);
+          VkFormatProperties color_rt_format_properties;
+          vulkan_device->vulkan_instance()
+              ->functions()
+              .vkGetPhysicalDeviceFormatProperties(
+                  vulkan_device->physical_device(), color_rt_vulkan_format,
+                  &color_rt_format_properties);
+          if (!(color_rt_format_properties.optimalTilingFeatures &
+                VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) {
+            XELOGW(
+                "VulkanPipelineCache: Blending requested for color render "
+                "target {} with Vulkan format {}, which doesn't support "
+                "blending - disabling blending (render pass key {:08X})",
+                color_rt_index, uint32_t(color_rt_vulkan_format),
+                description.render_pass_key.key);
+            blend_enable = false;
+          }
+        }
+        if (blend_enable) {
           color_blend_attachment.blendEnable = VK_TRUE;
           color_blend_attachment.srcColorBlendFactor =
               kBlendFactorMap[uint32_t(color_rt.src_color_blend_factor)];
