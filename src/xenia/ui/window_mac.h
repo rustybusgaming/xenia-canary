@@ -10,6 +10,7 @@
 #ifndef XENIA_UI_WINDOW_MAC_H_
 #define XENIA_UI_WINDOW_MAC_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -79,6 +80,9 @@ class MacWindow : public Window {
   bool cursor_hidden_ = false;
   // Modifier flags from the last NSEventTypeFlagsChanged.
   uint64_t last_modifier_flags_ = 0;
+
+  // Whether a paint has been requested, but not performed yet.
+  std::atomic<bool> paint_requested_{false};
 };
 
 class MacMenuItem : public MenuItem {

@@ -841,18 +841,25 @@ std::unique_ptr<Surface> MacWindow::CreateSurfaceImpl(
 }
 
 void MacWindow::RequestPaintImpl() {
-  // May be called from any thread. The block keeps the view alive, and
-  // XeniaMetalView ignores painting once detached from the MacWindow.
+  // May be called from any thread. The block keeps the view alive, and paints
+  // only while it's attached to the MacWindow.
   XeniaMetalView* view = (__bridge XeniaMetalView*)ns_view_;
   if (!view) {
     return;
   }
-  if ([NSThread isMainThread]) {
-    view.needsDisplay = YES;
+  // A CAMetalLayer is not drawn by AppKit, so marking the view as needing
+  // display doesn't necessarily result in updateLayer being called. Paint
+  // directly in the next iteration of the main run loop instead, coalescing
+  // multiple requests.
+  if (paint_requested_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
   dispatch_async(dispatch_get_main_queue(), ^{
-    view.needsDisplay = YES;
+    MacWindow* window = view->window_;
+    if (window) {
+      window->paint_requested_.store(false, std::memory_order_release);
+      window->HandlePaint();
+    }
   });
 }
 
