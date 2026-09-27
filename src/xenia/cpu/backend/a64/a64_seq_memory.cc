@@ -124,7 +124,7 @@ static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
   if (swap) {
     value = xe::byte_swap(value);
   }
-  if (guestaddr >= 0xE0000000) {
+  if (guestaddr >= 0xE0000000 && ppc::HasGuestE0000000HostOffset()) {
     guestaddr += 0x1000;
   }
   auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);
@@ -140,7 +140,7 @@ static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
 template <typename T, bool swap>
 static T MMIOAwareLoad(void* _ctx, unsigned int guestaddr) {
   T value;
-  if (guestaddr >= 0xE0000000) {
+  if (guestaddr >= 0xE0000000 && ppc::HasGuestE0000000HostOffset()) {
     guestaddr += 0x1000;
   }
   auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);

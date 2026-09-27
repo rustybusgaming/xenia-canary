@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 
+#include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/base/vec128.h"
 #include "xenia/guest_pointers.h"
@@ -246,6 +247,13 @@ enum class PPCRegister {
   kCR,
 };
 
+// Whether guest addresses 0xE0000000+ are 0x1000 higher in host memory, which
+// is the case when the host can't map memory with a 4 KB granularity.
+inline bool HasGuestE0000000HostOffset() {
+  static const bool has_offset = xe::memory::allocation_granularity() > 0x1000;
+  return has_offset;
+}
+
 #pragma pack(push, 8)
 typedef struct alignas(64) PPCContext_s {
   union {
@@ -439,6 +447,13 @@ typedef struct alignas(64) PPCContext_s {
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
       host_address += 0x1000;
     }
+#else
+    // Same as the 0xE0000000 heap's host address offset, applied by the CPU
+    // backends and Memory::TranslateVirtual on hosts with an allocation
+    // granularity above 4 KB (macOS on Apple silicon).
+    if (guest_address >= 0xE0000000 && HasGuestE0000000HostOffset()) {
+      host_address += 0x1000;
+    }
 #endif
     return reinterpret_cast<T>(host_address);
   }
@@ -465,6 +480,10 @@ typedef struct alignas(64) PPCContext_s {
         reinterpret_cast<const uint8_t*>(host_ptr) - virtual_membase);
 #if XE_PLATFORM_WIN32 == 1
     if (guest_tmp >= static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+      guest_tmp -= 0x1000;
+    }
+#else
+    if (guest_tmp >= 0xE0000000 + 0x1000 && HasGuestE0000000HostOffset()) {
       guest_tmp -= 0x1000;
     }
 #endif
