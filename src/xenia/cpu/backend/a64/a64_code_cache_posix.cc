@@ -56,6 +56,7 @@ static constexpr uint8_t kDwarfRegD15 = 79;
 // DWARF CFA opcodes.
 static constexpr uint8_t kDW_CFA_advance_loc1 = 0x02;
 static constexpr uint8_t kDW_CFA_advance_loc2 = 0x03;
+static constexpr uint8_t kDW_CFA_offset_extended = 0x05;
 static constexpr uint8_t kDW_CFA_def_cfa = 0x0c;
 static constexpr uint8_t kDW_CFA_def_cfa_offset = 0x0e;
 static constexpr uint8_t kDW_CFA_nop = 0x00;
@@ -291,7 +292,7 @@ void PosixA64CodeCache::InitializeUnwindEntry(
     if (func_info.stack_size == StackLayout::THUNK_STACK_SIZE) {
       // Thunk: encode all callee-saved register save locations.
       // See a64_stack_layout.h for the layout.
-      size_t cfa = func_info.stack_size;  // 224
+      size_t cfa = func_info.stack_size;
 
       // GPRs: x19-x28 saved as stp pairs at sp+0x00..0x48
       *p++ = 0x80 | kDwarfRegX19;
@@ -325,22 +326,13 @@ void PosixA64CodeCache::InitializeUnwindEntry(
       // stp q10,q11 at sp+0x080: d10=sp+0x080, d11=sp+0x090
       // stp q12,q13 at sp+0x0A0: d12=sp+0x0A0, d13=sp+0x0B0
       // stp q14,q15 at sp+0x0C0: d14=sp+0x0C0, d15=sp+0x0D0
-      *p++ = 0x80 | kDwarfRegD8;
-      p += WriteULEB128(p, (cfa - 0x060) / 8);
-      *p++ = 0x80 | kDwarfRegD9;
-      p += WriteULEB128(p, (cfa - 0x070) / 8);
-      *p++ = 0x80 | kDwarfRegD10;
-      p += WriteULEB128(p, (cfa - 0x080) / 8);
-      *p++ = 0x80 | kDwarfRegD11;
-      p += WriteULEB128(p, (cfa - 0x090) / 8);
-      *p++ = 0x80 | kDwarfRegD12;
-      p += WriteULEB128(p, (cfa - 0x0A0) / 8);
-      *p++ = 0x80 | kDwarfRegD13;
-      p += WriteULEB128(p, (cfa - 0x0B0) / 8);
-      *p++ = 0x80 | kDwarfRegD14;
-      p += WriteULEB128(p, (cfa - 0x0C0) / 8);
-      *p++ = 0x80 | kDwarfRegD15;
-      p += WriteULEB128(p, (cfa - 0x0D0) / 8);
+      // DW_CFA_offset only has 6 bits for the register number, so the NEON
+      // registers (DWARF 72+) need DW_CFA_offset_extended.
+      for (uint32_t d = 0; d < 8; ++d) {
+        *p++ = kDW_CFA_offset_extended;
+        p += WriteULEB128(p, kDwarfRegD8 + d);
+        p += WriteULEB128(p, (cfa - (0x060 + d * 0x10)) / 8);
+      }
     } else if (func_info.lr_save_offset > 0) {
       // Record where x30 (LR / return address) is saved.
       // Without this, the unwinder cannot find the return address.
