@@ -39,6 +39,8 @@
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
 #include <mach/task.h>
+#include <mach/thread_policy.h>
+#include <pthread/qos.h>
 #endif
 
 #if XE_PLATFORM_LINUX
@@ -693,6 +695,10 @@ struct ThreadStartData {
   std::function<void()> start_routine;
   bool create_suspended;
   Thread* thread_obj;
+#if XE_PLATFORM_MAC
+  // Applied by the thread itself after starting if not 0.
+  int32_t initial_priority = 0;
+#endif
 };
 
 template <>
@@ -726,6 +732,14 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       pthread_attr_destroy(&attr);
       return false;
     }
+#if XE_PLATFORM_MAC
+    // Relative priorities are set with the Mach thread policy after the thread
+    // has started (see set_priority), SCHED_FIFO priorities have a different
+    // meaning on macOS.
+    if (params.initial_priority != 0) {
+      start_data->initial_priority = params.initial_priority;
+    }
+#else
     if (params.initial_priority != 0) {
       sched_param sched{};
       sched.sched_priority = params.initial_priority + 1;
@@ -738,6 +752,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         return false;
       }
     }
+#endif  // XE_PLATFORM_MAC
     if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
       pthread_attr_destroy(&attr);
       return false;
@@ -909,6 +924,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   int priority() const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    return priority_;
+#endif  // XE_PLATFORM_MAC
     if (!fifo_failed_) {
       int policy;
       sched_param param{};
@@ -932,6 +950,20 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void set_priority(int new_priority) const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // SCHED_FIFO priorities on macOS are absolute (the normal priority being
+    // 31, and the minimum 15), so the 1...32 range used here would demote
+    // threads, and make the lower ones be scheduled on the efficiency cores.
+    // Instead, adjust the importance of the thread relatively to others in the
+    // process, around the priority of its QoS class.
+    priority_ = new_priority;
+    thread_precedence_policy_data_t precedence_policy;
+    precedence_policy.importance = (new_priority - ThreadPriority::kNormal) / 4;
+    thread_policy_set(pthread_mach_thread_np(thread_), THREAD_PRECEDENCE_POLICY,
+                      reinterpret_cast<thread_policy_t>(&precedence_policy),
+                      THREAD_PRECEDENCE_POLICY_COUNT);
+    return;
+#endif  // XE_PLATFORM_MAC
     if (!fifo_failed_) {
       // Try real-time SCHED_FIFO for best priority control.
       sched_param param{};
@@ -1143,6 +1175,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   pthread_t thread_;
   pid_t tid_ = 0;                     // Kernel TID for setpriority() fallback
   mutable bool fifo_failed_ = false;  // True after SCHED_FIFO was rejected
+#if XE_PLATFORM_MAC
+  mutable int priority_ = ThreadPriority::kNormal;
+#endif
   bool signaled_;
   int exit_code_;
   State state_;  // Protected by state_mutex_
@@ -1464,6 +1499,12 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #endif
   threading::set_name("");
 
+#if XE_PLATFORM_MAC
+  // Emulation is latency-sensitive, like a game - without an explicit QoS
+  // class, threads may be placed on the efficiency cores of Apple silicon.
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+
   auto start_data = static_cast<ThreadStartData*>(parameter);
   assert_not_null(start_data);
   assert_not_null(start_data->thread_obj);
@@ -1471,6 +1512,9 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   auto thread = dynamic_cast<PosixThread*>(start_data->thread_obj);
   auto start_routine = std::move(start_data->start_routine);
   auto create_suspended = start_data->create_suspended;
+#if XE_PLATFORM_MAC
+  int32_t initial_priority = start_data->initial_priority;
+#endif
   delete start_data;
 
   current_thread_ = thread;
@@ -1481,6 +1525,11 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
         create_suspended ? State::kSuspended : State::kRunning;
     thread->handle_.state_signal_.notify_all();
   }
+#if XE_PLATFORM_MAC
+  if (initial_priority != 0) {
+    thread->handle_.set_priority(initial_priority);
+  }
+#endif
 
   if (create_suspended) {
     std::unique_lock lock(thread->handle_.state_mutex_);
