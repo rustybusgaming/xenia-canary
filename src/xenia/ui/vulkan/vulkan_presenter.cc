@@ -2541,6 +2541,10 @@ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(
   input_assembly_state.sType =
       VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
   input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  // Not indexed, so it doesn't matter, but avoid a warning where primitive
+  // restart can't be disabled.
+  input_assembly_state.primitiveRestartEnable =
+      vulkan_device_->IsPrimitiveRestartAlwaysEnabled() ? VK_TRUE : VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewport_state = {};
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;

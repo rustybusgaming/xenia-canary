@@ -2912,8 +2912,22 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       assert_unhandled_case(description.primitive_topology);
       return false;
   }
+  bool primitive_restart = description.primitive_restart;
+  if (!primitive_restart &&
+      (description.primitive_topology ==
+           PipelinePrimitiveTopology::kLineStrip ||
+       description.primitive_topology ==
+           PipelinePrimitiveTopology::kTriangleStrip ||
+       description.primitive_topology ==
+           PipelinePrimitiveTopology::kTriangleFan) &&
+      vulkan_device->IsPrimitiveRestartAlwaysEnabled()) {
+    // Primitive restart can't be disabled, and the primitive processor avoids
+    // the restart index in the indices when it's not wanted. Request what will
+    // actually happen, as MoltenVK warns about every pipeline disabling it.
+    primitive_restart = true;
+  }
   input_assembly_state.primitiveRestartEnable =
-      description.primitive_restart ? VK_TRUE : VK_FALSE;
+      primitive_restart ? VK_TRUE : VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewport_state;
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
