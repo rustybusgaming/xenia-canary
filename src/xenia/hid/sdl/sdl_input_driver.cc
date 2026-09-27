@@ -31,6 +31,20 @@ namespace xe {
 namespace hid {
 namespace sdl {
 
+namespace {
+// Controllers are added, removed and updated from SDL event watch callbacks,
+// which may run on any thread pumping SDL events, while guest threads access
+// them concurrently. SDL's own joystick lock is used rather than a separate
+// mutex, as SDL may invoke the event watch callbacks while holding it.
+class SDLJoysticksLock {
+ public:
+  SDLJoysticksLock() { SDL_LockJoysticks(); }
+  ~SDLJoysticksLock() { SDL_UnlockJoysticks(); }
+  SDLJoysticksLock(const SDLJoysticksLock&) = delete;
+  SDLJoysticksLock& operator=(const SDLJoysticksLock&) = delete;
+};
+}  // namespace
+
 SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order),
       sdl_events_initialized_(false),
@@ -198,6 +212,7 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   QueueControllerUpdate();
 
+  SDLJoysticksLock joysticks_lock;
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -221,6 +236,7 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
+  SDLJoysticksLock joysticks_lock;
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -243,6 +259,7 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
+  SDLJoysticksLock joysticks_lock;
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -320,6 +337,7 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
   QueueControllerUpdate();
 
+  SDLJoysticksLock joysticks_lock;
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
     auto controller = GetControllerState(user_index);
@@ -412,6 +430,7 @@ InputType SDLInputDriver::GetInputType() const { return InputType::Controller; }
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
+  SDLJoysticksLock joysticks_lock;
 
   // Event queue should never be (this) full
   assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
@@ -533,7 +552,11 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
 
 void SDLInputDriver::OnControllerDeviceAxisMotion(const SDL_Event& event) {
   auto idx = GetControllerIndexFromInstanceID(event.caxis.which);
-  assert(idx);
+  if (!idx) {
+    // An event for a controller that has been removed, or that was ignored
+    // because all slots were taken.
+    return;
+  }
   auto& pad = controllers_.at(*idx).state.gamepad;
   switch (event.caxis.axis) {
     case SDL_CONTROLLER_AXIS_LEFTX:
@@ -599,7 +622,11 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   static_assert(SDL_CONTROLLER_BUTTON_DPAD_RIGHT == 14);
 
   auto idx = GetControllerIndexFromInstanceID(event.cbutton.which);
-  assert(idx);
+  if (!idx) {
+    // An event for a controller that has been removed, or that was ignored
+    // because all slots were taken.
+    return;
+  }
   auto& controller = controllers_.at(*idx);
 
   uint16_t xbuttons = controller.state.gamepad.buttons;
