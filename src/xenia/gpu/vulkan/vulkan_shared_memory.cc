@@ -425,7 +425,8 @@ bool VulkanSharedMemory::UploadRanges(
                                                        range_end_addr);
       if (start_access == xe::memory::PageAccess::kNoAccess ||
           end_access == xe::memory::PageAccess::kNoAccess) {
-        XELOGE(
+        XELOGE_LIMITED(
+            16,
             "Vulkan shared memory: Invalid upload range {:08X} length {:08X}",
             upload_range_start, upload_range_length);
         successful = false;

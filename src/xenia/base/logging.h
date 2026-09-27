@@ -10,6 +10,7 @@
 #ifndef XENIA_BASE_LOGGING_H_
 #define XENIA_BASE_LOGGING_H_
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <string>
@@ -243,5 +244,20 @@ void XELOGFS(std::string_view format, const Args&... args) {
 #define XELOGFS(...) __XELOGDUMMY
 
 #endif  // ENABLE_LOGGING
+
+// Logs an error only the first `limit` times this call site is reached, for
+// errors that may happen every frame, as logging them all would flood the log
+// and slow down the emulator.
+#define XELOGE_LIMITED(limit, ...)                                       \
+  do {                                                                   \
+    static std::atomic<uint32_t> xe_logged_count_{0};                    \
+    uint32_t xe_logged_count =                                           \
+        xe_logged_count_.fetch_add(1, std::memory_order_relaxed);        \
+    if (xe_logged_count < (limit)) {                                     \
+      XELOGE(__VA_ARGS__);                                               \
+    } else if (xe_logged_count == (limit)) {                             \
+      XELOGE("(Further occurrences of the error above are not logged)"); \
+    }                                                                    \
+  } while (false)
 
 #endif  // XENIA_BASE_LOGGING_H_

@@ -344,8 +344,8 @@ bool D3D12SharedMemory::UploadRanges(
 
       if (start_access == xe::memory::PageAccess::kNoAccess ||
           end_access == xe::memory::PageAccess::kNoAccess) {
-        XELOGE("Invalid upload range for GPU: {:08X} length {:08X}",
-               upload_range_start, upload_range_length);
+        XELOGE_LIMITED(16, "Invalid upload range for GPU: {:08X} length {:08X}",
+                       upload_range_start, upload_range_length);
         return false;
       }
     }

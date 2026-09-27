@@ -1178,7 +1178,8 @@ bool VulkanRenderTargetCache::Resolve(
           shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
                                      resolve_info.copy_dest_extent_length);
       if (!copy_dest_committed) {
-        XELOGE(
+        XELOGE_LIMITED(
+            16,
             "VulkanRenderTargetCache: Failed to obtain the resolve destination "
             "memory region");
       } else {

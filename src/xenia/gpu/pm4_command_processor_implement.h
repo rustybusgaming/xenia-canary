@@ -1101,10 +1101,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
                                      vgt_draw_initiator.prim_type));
       if (!draw_succeeded) {
-        XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
-               vgt_draw_initiator.num_indices,
-               uint32_t(vgt_draw_initiator.prim_type),
-               uint32_t(vgt_draw_initiator.source_select));
+        XELOGE_LIMITED(16, "{}({}, {}, {}): Failed in backend", opcode_name,
+                       vgt_draw_initiator.num_indices,
+                       uint32_t(vgt_draw_initiator.prim_type),
+                       uint32_t(vgt_draw_initiator.source_select));
       }
     }
   }

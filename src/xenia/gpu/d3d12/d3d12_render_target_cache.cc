@@ -1491,7 +1491,8 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
         }
         copied = true;
       } else {
-        XELOGE(
+        XELOGE_LIMITED(
+            16,
             "D3D12RenderTargetCache: Failed to obtain the resolve destination "
             "memory region");
       }
