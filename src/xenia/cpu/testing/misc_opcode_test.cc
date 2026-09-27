@@ -20,6 +20,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <vector>
 
 using namespace xe;
 using namespace xe::cpu;
@@ -330,6 +331,104 @@ TEST_CASE("RSQRT_F64", "[arithmetic]") {
 // product) may be computed for one lane and broadcast. It must match the
 // per-lane result.
 // ============================================================================
+// Reference PPC vrsqrtefp for one lane, the scalar algorithm the backends
+// implement (see x64's EmitScalarVRsqrteHelper).
+static uint32_t ReferenceVrsqrtefp(uint32_t bits) {
+  static constexpr uint32_t table[32] = {
+      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
+      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
+      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
+      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
+      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
+      0x01855D79, 0x01735BF4,
+  };
+  uint32_t sign = bits >> 31;
+  uint32_t biased_exp = (bits >> 23) & 0xFF;
+  uint32_t mantissa = bits & 0x007FFFFF;
+  if (bits == 0xFF800000u) {
+    return 0x7FC00000u;
+  }
+  if (biased_exp == 0) {
+    return sign ? 0xFF800000u : 0x7F800000u;
+  }
+  if (biased_exp == 255) {
+    if (mantissa == 0) {
+      return 0;
+    }
+    return bits | 0x00400000u;
+  }
+  if (sign) {
+    return 0x7FC00000u;
+  }
+  int32_t unbiased_exp = int32_t(biased_exp) - 127;
+  uint32_t exp_parity = (uint32_t(unbiased_exp << 4)) & 16;
+  uint32_t index = (exp_parity | (mantissa >> 19)) ^ 16;
+  uint32_t interp = (mantissa >> 9) & 1023;
+  int32_t result_exp = (127 - int32_t(biased_exp)) >> 1;
+  uint32_t entry = table[index];
+  uint32_t slope = entry >> 16;
+  uint32_t base = (entry << 10) & 0x3FFFC00u;
+  int32_t raw = int32_t(base) - int32_t(interp * slope);
+  if (!(raw & (1 << 25))) {
+    uint32_t val = uint32_t(raw) & 0x1FFFFFF;
+    int32_t lz = int32_t(xe::lzcnt(val));
+    result_exp += 6 - lz;
+    raw = int32_t(uint32_t(raw) << (lz - 6));
+  }
+  if ((raw & 5) && (raw & 2)) {
+    raw += 4;
+  }
+  uint32_t result = uint32_t((uint32_t(result_exp) << 23) + 0x3F800000) |
+                    ((uint32_t(raw) >> 2) & 0x7FFFFF);
+  if (((result >> 23) & 0xFF) == 0 && (result & 0x7FFFFF)) {
+    result = 0;
+  }
+  return result;
+}
+
+TEST_CASE("RSQRT_V128_MATCHES_REFERENCE", "[vector]") {
+  std::vector<uint32_t> inputs = {
+      0x00000000, 0x80000000, 0x00000001, 0x807FFFFF, 0x7F800000, 0xFF800000,
+      0x7FC00000, 0xFFC00001, 0x7F800001, 0xFF812345, 0x3F800000, 0xBF800000,
+      0x00800000, 0x7F7FFFFF, 0x40800000, 0x3E800000, 0x80800000, 0x7FFFFFFF,
+  };
+  // Every table entry and interpolation range for a few exponents.
+  for (uint32_t exponent : {1u, 2u, 126u, 127u, 128u, 129u, 200u, 253u, 254u}) {
+    for (uint32_t mantissa = 0; mantissa < 0x800000; mantissa += 0x1FF3) {
+      inputs.push_back((exponent << 23) | mantissa);
+    }
+    inputs.push_back((exponent << 23) | 0x7FFFFF);
+  }
+  // Pseudo-random bit patterns.
+  uint32_t state = 0x12345678;
+  for (int n = 0; n < 4096; ++n) {
+    state = state * 1664525u + 1013904223u;
+    inputs.push_back(state);
+  }
+  while (inputs.size() % 4) {
+    inputs.push_back(0x3F800000);
+  }
+
+  TestFunction test([](HIRBuilder& b) {
+    StoreVR(b, 3, b.RSqrt(LoadVR(b, 4)));
+    b.Return();
+  });
+  for (size_t i = 0; i < inputs.size(); i += 4) {
+    test.Run(
+        [&](PPCContext* ctx) {
+          ctx->v[4] =
+              vec128i(inputs[i], inputs[i + 1], inputs[i + 2], inputs[i + 3]);
+        },
+        [&](PPCContext* ctx) {
+          for (int lane = 0; lane < 4; ++lane) {
+            INFO("input " << std::hex << inputs[i + lane]);
+            REQUIRE(ctx->v[3].u32[lane] ==
+                    ReferenceVrsqrtefp(inputs[i + lane]));
+          }
+        });
+  }
+}
+
 TEST_CASE("RSQRT_V128_SAME_LANES_MATCHES_PER_LANE", "[vector]") {
   const vec128_t inputs[] = {vec128f(1.0f, 2.0f, 3.0f, 4.0f),
                              vec128f(0.5f, 0.25f, 0.125f, 1.5f),

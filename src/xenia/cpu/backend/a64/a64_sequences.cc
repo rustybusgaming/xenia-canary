@@ -4491,128 +4491,149 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
     e.fmov(i.dest, e.x0);
   }
 };
-// PPC vrsqrtefp per-lane implementation.
-// Uses the same 32-entry lookup table + interpolation as x64's
-// EmitScalarVRsqrteHelper.
-static uint32_t PpcVrsqrtefpLane(uint32_t bits) {
-  static constexpr uint32_t table[32] = {
-      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
-      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
-      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
-      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
-      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
-      0x01855D79, 0x01735BF4,
-  };
+// PPC vrsqrtefp estimate lookup table, the same as x64's
+// EmitScalarVRsqrteHelper: 16-bit slope in the upper half, 16-bit base in the
+// lower half of each entry.
+static constexpr uint32_t kVrsqrtefpTable[32] = {
+    0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
+    0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
+    0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
+    0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
+    0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
+    0x01855D79, 0x01735BF4,
+};
 
-  uint32_t sign = bits >> 31;
-  uint32_t biased_exp = (bits >> 23) & 0xFF;
-  uint32_t mantissa = bits & 0x007FFFFF;
-
-  // -Inf → QNaN
-  if (bits == 0xFF800000u) {
-    return 0x7FC00000u;
-  }
-
-  // Denormal or zero (exp == 0)
-  if (biased_exp == 0) {
-    // ±0 or denormal with NJM on → flush to ±0 → ±Inf
-    return sign ? 0xFF800000u : 0x7F800000u;
-  }
-
-  // NaN/Inf (exp == 255)
-  if (biased_exp == 255) {
-    if (mantissa == 0) {
-      // +Inf → +0 (-Inf already handled above)
-      return 0;
-    }
-    // NaN: quiet it (set bit 22), preserve sign and payload
-    return bits | 0x00400000u;
-  }
-
-  // Negative normal → QNaN
-  if (sign) {
-    return 0x7FC00000u;
-  }
-
-  // Normal positive: table lookup + interpolation
-  int32_t unbiased_exp = (int32_t)biased_exp - 127;
-
-  // Table index: exp parity selects half, top 4 mantissa bits select entry
-  uint32_t exp_parity = ((uint32_t)(unbiased_exp << 4)) & 16;
-  uint32_t top4 = mantissa >> 19;
-  uint32_t index = (exp_parity | top4) ^ 16;
-
-  // 10-bit interpolation factor from mantissa
-  uint32_t interp = (mantissa >> 9) & 1023;
-
-  // Result exponent (arithmetic shift)
-  int32_t result_exp = (127 - (int32_t)biased_exp) >> 1;
-
-  // Lookup + linear interpolation
-  uint32_t entry = table[index];
-  uint32_t slope = entry >> 16;
-  uint32_t base = (entry << 10) & 0x3FFFC00u;
-  int32_t raw = (int32_t)base - (int32_t)(interp * slope);
-
-  // Normalize if bit 25 not set
-  if (!(raw & (1 << 25))) {
-    uint32_t val = (uint32_t)raw & 0x1FFFFFF;
-    uint32_t lz = (uint32_t)xe::lzcnt(val);
-    int32_t shift = (int32_t)lz - 6;
-    result_exp += 6;
-    result_exp -= (int32_t)lz;
-    raw <<= shift;
-  }
-
-  // Rounding
-  if ((raw & 5) && (raw & 2)) {
-    raw += 4;
-  }
-
-  // Assemble result
-  uint32_t res_exp = (uint32_t)((result_exp << 23) + 0x3F800000);
-  uint32_t res_man = ((uint32_t)raw >> 2) & 0x7FFFFF;
-  uint32_t result = res_exp | res_man;
-
-  // DAZ: flush denormal output to +0
-  if (((result >> 23) & 0xFF) == 0 && (result & 0x7FFFFF)) {
-    result = 0;
-  }
-
-  return result;
-}
-
+// PPC vrsqrtefp, bit-exact, computed for all lanes with NEON.
+//
+// For a normal positive input with biased exponent e and mantissa m:
+// - The table index is the low bit of e and the top 4 bits of m, which is
+//   (bits >> 19) & 0x1F.
+// - raw = base - ((m >> 9) & 1023) * slope, normalized so that bit 25 is set
+//   (adjusting the result exponent, (127 - e) >> 1).
+// - raw is rounded up by 4 if bit 1 and either bit 0 or bit 2 are set.
+// - The result is ((exp << 23) + 0x3F800000) | ((raw >> 2) & 0x7FFFFF), with
+//   a denormal result flushed to +0.
+// Special inputs, by decreasing priority:
+// - -Inf -> QNaN.
+// - Zero or denormal -> Inf with the sign of the input.
+// - +Inf -> +0, NaN -> quieted NaN.
+// - Negative -> QNaN.
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
+  static void Dup(A64Emitter& e, int vreg, uint32_t value) {
+    e.mov(e.w9, static_cast<uint64_t>(value));
+    e.dup(VReg(vreg).s4, e.w9);
+  }
+
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Scratch: v0-v3, and the destination as it's only written at the end.
+    const int d = i.dest.reg().getIdx();
+    const int32_t scratch = static_cast<int32_t>(StackLayout::GUEST_SCRATCH);
     int src_idx = SrcVReg(e, i.src1, 0);
-    // Most inputs to vrsqrtefp come from vmsum3/vmsum4 in vector
-    // normalization, with the same value in all lanes. Compute that lane only
-    // and broadcast it, as the x64 backend does.
-    if (i.src1.value && i.src1.value->AllFloatVectorLanesSameValue()) {
-      e.fmov(e.w0, SReg(src_idx));
-      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
-      e.blr(e.x9);
-      e.dup(VReg(i.dest.reg().getIdx()).s4, e.w0);
-      return;
+    if (src_idx != 0) {
+      e.mov(VReg(0).b16, VReg(src_idx).b16);
     }
-    // Call PpcVrsqrtefpLane directly per lane (pure integer math).
-    // Save source to stack scratch, accumulate results there, load at end.
-    e.str(QReg(src_idx),
-          Xbyak_aarch64::ptr(e.sp,
-                             static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
-    for (int lane = 0; lane < 4; lane++) {
-      e.ldr(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
-      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
-      e.blr(e.x9);
-      e.str(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
+    // Keep the input for the special cases at the end.
+    e.str(QReg(0), Xbyak_aarch64::ptr(e.sp, scratch));
+
+    // v1 = table entries.
+    e.ushr(VReg(2).s4, VReg(0).s4, 19);
+    Dup(e, 3, 0x1F);
+    e.and_(VReg(2).b16, VReg(2).b16, VReg(3).b16);
+    e.mov(e.x11, reinterpret_cast<uint64_t>(kVrsqrtefpTable));
+    for (int lane = 0; lane < 4; ++lane) {
+      e.umov(e.w10, VReg(2).s4[lane]);
+      e.ldr(e.w10, Xbyak_aarch64::ptr(e.x11, e.x10, Xbyak_aarch64::LSL, 2));
+      e.ins(VReg(1).s4[lane], e.w10);
     }
-    e.ldr(QReg(i.dest.reg().getIdx()),
-          Xbyak_aarch64::ptr(e.sp,
-                             static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
+    // v2 = interpolation factor * slope.
+    e.ushr(VReg(2).s4, VReg(0).s4, 9);
+    Dup(e, 3, 1023);
+    e.and_(VReg(2).b16, VReg(2).b16, VReg(3).b16);
+    e.ushr(VReg(3).s4, VReg(1).s4, 16);
+    e.mul(VReg(2).s4, VReg(2).s4, VReg(3).s4);
+    // v1 = raw = base - interpolation factor * slope.
+    e.shl(VReg(1).s4, VReg(1).s4, 10);
+    Dup(e, 3, 0x3FFFC00);
+    e.and_(VReg(1).b16, VReg(1).b16, VReg(3).b16);
+    e.sub(VReg(1).s4, VReg(1).s4, VReg(2).s4);
+    // v2 = result exponent = (127 - e) >> 1.
+    e.ushr(VReg(2).s4, VReg(0).s4, 23);
+    Dup(e, 3, 0xFF);
+    e.and_(VReg(2).b16, VReg(2).b16, VReg(3).b16);
+    Dup(e, 3, 127);
+    e.sub(VReg(2).s4, VReg(3).s4, VReg(2).s4);
+    e.sshr(VReg(2).s4, VReg(2).s4, 1);
+
+    // Normalize raw if bit 25 isn't set: shift = clz(raw & 0x1FFFFFF) - 6,
+    // raw <<= shift, exponent -= shift.
+    Dup(e, d, 0x1FFFFFF);
+    e.and_(VReg(d).b16, VReg(1).b16, VReg(d).b16);
+    e.clz(VReg(d).s4, VReg(d).s4);
+    Dup(e, 3, 6);
+    e.sub(VReg(3).s4, VReg(d).s4, VReg(3).s4);   // v3 = shift
+    e.sub(VReg(d).s4, VReg(2).s4, VReg(3).s4);   // vd = normalized exponent
+    e.ushl(VReg(3).s4, VReg(1).s4, VReg(3).s4);  // v3 = normalized raw
+    // v0 = all ones where bit 25 is set (already normalized).
+    e.shl(VReg(0).s4, VReg(1).s4, 6);
+    e.sshr(VReg(0).s4, VReg(0).s4, 31);
+    e.bif(VReg(2).b16, VReg(d).b16, VReg(0).b16);
+    e.bif(VReg(1).b16, VReg(3).b16, VReg(0).b16);
+
+    // Round: raw += 4 if (raw & 2) && (raw & 5).
+    Dup(e, 3, 2);
+    e.cmtst(VReg(0).s4, VReg(1).s4, VReg(3).s4);
+    Dup(e, 3, 5);
+    e.cmtst(VReg(3).s4, VReg(1).s4, VReg(3).s4);
+    e.and_(VReg(0).b16, VReg(0).b16, VReg(3).b16);
+    Dup(e, 3, 4);
+    e.and_(VReg(0).b16, VReg(0).b16, VReg(3).b16);
+    e.add(VReg(1).s4, VReg(1).s4, VReg(0).s4);
+
+    // v1 = ((exponent << 23) + 0x3F800000) | ((raw >> 2) & 0x7FFFFF).
+    e.shl(VReg(2).s4, VReg(2).s4, 23);
+    Dup(e, 3, 0x3F800000);
+    e.add(VReg(2).s4, VReg(2).s4, VReg(3).s4);
+    e.ushr(VReg(1).s4, VReg(1).s4, 2);
+    Dup(e, 3, 0x7FFFFF);
+    e.and_(VReg(1).b16, VReg(1).b16, VReg(3).b16);
+    e.orr(VReg(1).b16, VReg(1).b16, VReg(2).b16);
+    // Flush a denormal result to +0.
+    Dup(e, 0, 0x7F800000);
+    e.cmtst(VReg(2).s4, VReg(1).s4, VReg(0).s4);  // exponent != 0
+    e.cmtst(VReg(0).s4, VReg(1).s4, VReg(3).s4);  // mantissa != 0
+    e.bic(VReg(0).b16, VReg(0).b16, VReg(2).b16);
+    e.bic(VReg(1).b16, VReg(1).b16, VReg(0).b16);
+
+    // Special inputs, from the lowest to the highest priority.
+    e.ldr(QReg(0), Xbyak_aarch64::ptr(e.sp, scratch));
+    // Negative -> QNaN.
+    e.sshr(VReg(2).s4, VReg(0).s4, 31);
+    Dup(e, 3, 0x7FC00000);
+    e.bit(VReg(1).b16, VReg(3).b16, VReg(2).b16);
+    // Exponent 255: +Inf -> +0, NaN -> quieted NaN.
+    Dup(e, 2, 0x7F800000);
+    e.and_(VReg(3).b16, VReg(0).b16, VReg(2).b16);
+    e.cmeq(VReg(2).s4, VReg(3).s4, VReg(2).s4);
+    Dup(e, 3, 0x7FFFFF);
+    e.cmtst(VReg(3).s4, VReg(0).s4, VReg(3).s4);
+    Dup(e, d, 0x00400000);
+    e.orr(VReg(d).b16, VReg(d).b16, VReg(0).b16);
+    e.and_(VReg(3).b16, VReg(3).b16, VReg(d).b16);
+    e.bit(VReg(1).b16, VReg(3).b16, VReg(2).b16);
+    // Zero or denormal -> Inf with the sign of the input.
+    Dup(e, 2, 0x7F800000);
+    e.cmtst(VReg(3).s4, VReg(0).s4, VReg(2).s4);  // exponent != 0
+    e.ushr(VReg(d).s4, VReg(0).s4, 31);
+    e.shl(VReg(d).s4, VReg(d).s4, 31);
+    e.orr(VReg(d).b16, VReg(d).b16, VReg(2).b16);
+    e.bif(VReg(1).b16, VReg(d).b16, VReg(3).b16);
+    // -Inf -> QNaN.
+    Dup(e, 2, 0xFF800000);
+    e.cmeq(VReg(2).s4, VReg(0).s4, VReg(2).s4);
+    Dup(e, 3, 0x7FC00000);
+    e.bit(VReg(1).b16, VReg(3).b16, VReg(2).b16);
+
+    e.mov(VReg(d).b16, VReg(1).b16);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
