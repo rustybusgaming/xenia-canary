@@ -128,11 +128,21 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
   // x21 = virtual_membase (loaded from context)
   ldr(x21, ptr(x20, static_cast<int32_t>(
                         offsetof(ppc::PPCContext, virtual_membase))));
+  // Save the FPCR of the caller and the FPCR mode tracked for guest code (it
+  // may be called back from the host while guest code is in the VMX mode),
+  // to restore them when returning.
+  auto flags_ptr =
+      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, flags)));
+  mrs(x11, 3, 3, 4, 4, 0);  // mrs x11, FPCR
+  ldr(w12, flags_ptr);
+  stp(x11, x12, ptr(sp, static_cast<int32_t>(StackLayout::THUNK_SAVED_FPCR)));
   // Restore the guest scalar FPCR on every host->guest entry so host-side
   // work done before the call can't leak a stale rounding / non-IEEE mode.
   ldr(w11,
       ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
   msr(3, 3, 4, 4, 0, x11);
+  and_(w12, w12, ~(1u << kA64BackendFPCRModeBit));
+  str(w12, flags_ptr);
   // x0 still holds target, x2 holds return address.
   // The guest function's prolog stores x0 to GUEST_RET_ADDR on its stack
   // frame. Move the target to a scratch reg and put the guest return
@@ -143,6 +153,16 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
 
   // Call the guest function.
   blr(x9);
+
+  // Restore the FPCR of the caller and the FPCR mode of the guest code that
+  // may have been interrupted, keeping the other flags.
+  ldp(x11, x12, ptr(sp, static_cast<int32_t>(StackLayout::THUNK_SAVED_FPCR)));
+  msr(3, 3, 4, 4, 0, x11);
+  static_assert(kA64BackendFPCRModeBit == 0,
+                "bfxil inserts the mode bit at bit 0");
+  ldr(w11, flags_ptr);
+  bfxil(w11, w12, kA64BackendFPCRModeBit, 1);
+  str(w11, flags_ptr);
 
   code_offsets.epilog = getSize();
 
@@ -256,12 +276,24 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   // x1, x2, x3 already hold args from the caller.
   blr(x9);
 
-  // Host callbacks may change FPCR. Restore the guest scalar FPCR before
-  // resuming the JIT so later guest ops observe the cached PPC mode.
+  // Host callbacks may change FPCR. Restore the guest FPCR for the mode that
+  // the JIT tracks (the guest code may have been in the VMX mode when calling
+  // the host), only writing FPCR if it has actually been changed.
   // x19 (backend context) is callee-saved, so it survives the host call.
-  ldr(w11,
+  // x0 (the return value) must be preserved.
+  Xbyak_aarch64::Label restored_fpcr;
+  ldr(w11, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+  ldr(w12,
       ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
-  msr(3, 3, 4, 4, 0, x11);
+  ldr(w13,
+      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_vmx))));
+  tst(w11, 1u << kA64BackendFPCRModeBit);
+  csel(x12, x13, x12, Xbyak_aarch64::Cond::NE);
+  mrs(x13, 3, 3, 4, 4, 0);  // mrs x13, FPCR
+  cmp(x12, x13);
+  b(Xbyak_aarch64::Cond::EQ, restored_fpcr);
+  msr(3, 3, 4, 4, 0, x12);
+  L(restored_fpcr);
 
   code_offsets.epilog = getSize();
 
@@ -838,6 +870,7 @@ void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
   __asm__ volatile("msr fpcr, %0" : : "r"(static_cast<uint64_t>(fpcr_val)));
 #endif
   bctx->fpcr_fpu = fpcr_val;
+  bctx->flags &= ~(1u << kA64BackendFPCRModeBit);
   if (control & 0b100) {
     bctx->flags |= (1u << kA64BackendNonIEEEMode);
   } else {

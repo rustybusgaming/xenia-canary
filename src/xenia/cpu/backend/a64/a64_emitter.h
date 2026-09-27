@@ -141,13 +141,16 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   static void HandleStackpointOverflowError(ppc::PPCContext* context);
 
-  void ForgetFpcrMode() {
-    if (fpcr_mode_ == FPCRMode::Vmx) {
-      ChangeFpcrMode(FPCRMode::Fpu);
-    }
-    fpcr_mode_ = FPCRMode::Unknown;
-  }
+  // The FPCR mode at block boundaries and after calls isn't known statically.
+  // FPCR is left as it is - the kA64BackendFPCRModeBit flag in the backend
+  // context tracks which mode is actually active, so the next sequence that
+  // needs a specific mode only writes FPCR if the mode is different.
+  void ForgetFpcrMode() { fpcr_mode_ = FPCRMode::Unknown; }
   bool ChangeFpcrMode(FPCRMode new_mode, bool already_set = false);
+  // Whether the instruction is a scalar floating-point operation whose result
+  // depends on FPCR (rounding mode, flush to zero), and thus must be emitted
+  // with the guest FPU FPCR.
+  static bool NeedsFpuFpcr(const hir::Instr* instr);
   bool IsFeatureEnabled(uint64_t feature_flag) const {
     return (feature_flags_ & feature_flag) == feature_flag;
   }

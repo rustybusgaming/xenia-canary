@@ -4758,6 +4758,14 @@ struct SET_NJM : Sequence<SET_NJM, I<OPCODE_SET_NJM, VoidOp, I8Op>> {
     }
     e.str(e.w0, ptr(bctx, static_cast<uint32_t>(
                               offsetof(A64BackendContext, fpcr_vmx))));
+    // If FPCR is in the VMX mode, apply the new value now - VMX sequences
+    // don't reload FPCR when the mode flag says it's already in that mode.
+    auto& vmx_fpcr_inactive = e.NewCachedLabel();
+    e.ldr(e.w1,
+          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+    e.tbz(e.w1, kA64BackendFPCRModeBit, vmx_fpcr_inactive);
+    e.msr(3, 3, 4, 4, 0, e.x0);  // msr FPCR, x0
+    e.L(vmx_fpcr_inactive);
 
     // Update kA64BackendNJMOn flag.
     e.ldr(e.w0,
