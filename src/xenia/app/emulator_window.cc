@@ -700,7 +700,7 @@ void EmulatorWindow::ControllerTypeDialog::OnDraw(ImGuiIO& io) {
       {"auto", "Automatic (as detected)"},
       {"gamepad", "Gamepad"},
       {"guitar", "Guitar"},
-      {"guitar_alternate", "Guitar (alternate)"},
+      {"guitar_alternate", "Guitar (alternate, used by Guitar Hero)"},
       {"guitar_bass", "Bass guitar"},
       {"drum_kit", "Drum kit"},
       {"wheel", "Wheel"},
@@ -720,8 +720,9 @@ void EmulatorWindow::ControllerTypeDialog::OnDraw(ImGuiIO& io) {
   ImGui::Separator();
   ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
   ImGui::TextUnformatted(
-      "Use Guitar or Drum kit for instrument controllers that are detected "
+      "Use a guitar or Drum kit for instrument controllers that are detected "
       "as a gamepad, for example when connected through a wireless dongle. "
+      "Guitar Hero games expect the alternate guitar type. "
       "Some games only check the controller type when it connects, so "
       "reconnect the controller or restart the game if the change isn't "
       "picked up.");
