@@ -326,6 +326,50 @@ TEST_CASE("RSQRT_F64", "[arithmetic]") {
 }
 
 // ============================================================================
+// RSQRT V128 of a vector with all lanes known to be the same (from a dot
+// product) may be computed for one lane and broadcast. It must match the
+// per-lane result.
+// ============================================================================
+TEST_CASE("RSQRT_V128_SAME_LANES_MATCHES_PER_LANE", "[vector]") {
+  const vec128_t inputs[] = {vec128f(1.0f, 2.0f, 3.0f, 4.0f),
+                             vec128f(0.5f, 0.25f, 0.125f, 1.5f),
+                             vec128f(10.0f, -3.0f, 7.0f, 0.001f)};
+  constexpr size_t kInputCount = sizeof(inputs) / sizeof(inputs[0]);
+  vec128_t dots[kInputCount], same_lanes_results[kInputCount];
+  // Only one TestFunction (and its guest memory) may exist at a time.
+  {
+    TestFunction test([](HIRBuilder& b) {
+      auto dot = b.DotProduct4(LoadVR(b, 4), LoadVR(b, 4));
+      StoreVR(b, 5, dot);
+      StoreVR(b, 3, b.RSqrt(dot));
+      b.Return();
+    });
+    for (size_t i = 0; i < kInputCount; ++i) {
+      test.Run([&](PPCContext* ctx) { ctx->v[4] = inputs[i]; },
+               [&](PPCContext* ctx) {
+                 dots[i] = ctx->v[5];
+                 same_lanes_results[i] = ctx->v[3];
+               });
+    }
+  }
+  {
+    TestFunction test([](HIRBuilder& b) {
+      StoreVR(b, 3, b.RSqrt(LoadVR(b, 4)));
+      b.Return();
+    });
+    for (size_t i = 0; i < kInputCount; ++i) {
+      test.Run(
+          [&](PPCContext* ctx) { ctx->v[4] = dots[i]; },
+          [&](PPCContext* ctx) {
+            for (int lane = 0; lane < 4; ++lane) {
+              REQUIRE(same_lanes_results[i].u32[lane] == ctx->v[3].u32[lane]);
+            }
+          });
+    }
+  }
+}
+
+// ============================================================================
 // RSQRT V128 — PPC vrsqrtefp (per-lane lookup table estimate)
 // ============================================================================
 TEST_CASE("RSQRT_V128", "[vector]") {

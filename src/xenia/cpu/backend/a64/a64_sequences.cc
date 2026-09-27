@@ -4584,9 +4584,19 @@ static uint32_t PpcVrsqrtefpLane(uint32_t bits) {
 
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    int src_idx = SrcVReg(e, i.src1, 0);
+    // Most inputs to vrsqrtefp come from vmsum3/vmsum4 in vector
+    // normalization, with the same value in all lanes. Compute that lane only
+    // and broadcast it, as the x64 backend does.
+    if (i.src1.value && i.src1.value->AllFloatVectorLanesSameValue()) {
+      e.fmov(e.w0, SReg(src_idx));
+      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
+      e.blr(e.x9);
+      e.dup(VReg(i.dest.reg().getIdx()).s4, e.w0);
+      return;
+    }
     // Call PpcVrsqrtefpLane directly per lane (pure integer math).
     // Save source to stack scratch, accumulate results there, load at end.
-    int src_idx = SrcVReg(e, i.src1, 0);
     e.str(QReg(src_idx),
           Xbyak_aarch64::ptr(e.sp,
                              static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
