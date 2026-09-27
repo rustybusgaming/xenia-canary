@@ -169,15 +169,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Store zero for call return address (we haven't made a call yet).
   str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
 
-  // Record stackpoint for longjmp recovery, then save the resulting depth
+  // Record stackpoint for longjmp recovery, and save the resulting depth
   // for post-call detection (if depth changes, a longjmp skipped frames).
   PushStackpoint();
-  if (cvars::a64_enable_host_guest_stack_synchronization) {
-    ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
-                          A64BackendContext, current_stackpoint_depth))));
-    str(w16, ptr(sp, static_cast<uint32_t>(
-                         StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  }
 
   // ========================================================================
   // BODY
@@ -630,38 +624,49 @@ void A64Emitter::PushStackpoint() {
   if (!cvars::a64_enable_host_guest_stack_synchronization) {
     return;
   }
+  // This is done in the prolog of every guest function, so keep it short.
   // x8 = stackpoints array, w9 = current depth
   ldr(x8, ptr(x19,
               static_cast<uint32_t>(offsetof(A64BackendContext, stackpoints))));
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
+  // Guest r1 and LR (32-bit).
+  ldr(w11, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  ldr(w12, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  // x8 = &stackpoints[w9]
+  static_assert(sizeof(A64BackendStackpoint) == 16,
+                "The stackpoint address is computed with a shift by 4");
+  add(x8, x8, w9, UXTW, 4);
 
-  // Store host SP.
+  // Store host SP, guest r1 and guest LR.
   mov(x10, sp);
   str(x10, ptr(x8, static_cast<uint32_t>(
                        offsetof(A64BackendStackpoint, host_stack_))));
-  // Store guest r1 (32-bit).
-  ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
-  str(w10, ptr(x8, static_cast<uint32_t>(
-                       offsetof(A64BackendStackpoint, guest_stack_))));
-  // Store guest LR (32-bit).
-  ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
-  str(w10, ptr(x8, static_cast<uint32_t>(
-                       offsetof(A64BackendStackpoint, guest_return_address_))));
+  static_assert(offsetof(A64BackendStackpoint, guest_return_address_) ==
+                    offsetof(A64BackendStackpoint, guest_stack_) + 4,
+                "Guest r1 and LR are stored as a pair");
+  stp(w11, w12,
+      ptr(x8,
+          static_cast<int32_t>(offsetof(A64BackendStackpoint, guest_stack_))));
 
-  // Increment depth.
+  // Increment depth, and save the new depth for post-call longjmp detection.
   add(w9, w9, 1);
   str(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
+  str(w9, ptr(sp, static_cast<uint32_t>(
+                      StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
 
   // Check for overflow.
-  mov(w10, static_cast<uint32_t>(cvars::a64_max_stackpoints));
-  cmp(w9, w10);
+  uint64_t max_stackpoints = static_cast<uint64_t>(cvars::a64_max_stackpoints);
+  if (max_stackpoints <= 0xFFF) {
+    cmp(w9, static_cast<uint32_t>(max_stackpoints));
+  } else if (!(max_stackpoints & 0xFFF) && max_stackpoints <= 0xFFF000) {
+    cmp(w9, static_cast<uint32_t>(max_stackpoints >> 12), 12);
+  } else {
+    mov(w10, static_cast<uint32_t>(max_stackpoints));
+    cmp(w9, w10);
+  }
   auto& overflow_label = AddToTail([](A64Emitter& e, Label& lbl) {
     e.CallNativeSafe(
         reinterpret_cast<void*>(A64Emitter::HandleStackpointOverflowError));
