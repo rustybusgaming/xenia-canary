@@ -21,6 +21,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <ctime>
@@ -404,32 +405,39 @@ class PosixConditionBase {
       return std::make_pair(result, 0);
     }
 
-    // For multiple handles, we need to poll since we can't wait on multiple
-    // condition variables simultaneously. This is a limitation of the POSIX
-    // condition variable API.
+    // A thread can't wait on multiple condition variables simultaneously, so
+    // register a waiter on each handle that they notify when their state
+    // changes, and check the handles again whenever that happens.
     auto start_time = std::chrono::steady_clock::now();
     auto end_time = (timeout == std::chrono::milliseconds::max())
                         ? std::chrono::steady_clock::time_point::max()
                         : start_time + timeout;
 
-    // When waiting for any of the handles, register as a waiter on each so
-    // that pulses happening between the polls release this thread.
+    // When waiting for any of the handles, also register as a pulse waiter on
+    // each so that pulses happening between the checks release this thread.
+    MultiWaiter multi_waiter;
     std::vector<uint64_t> pulse_generations;
-    if (!wait_all) {
-      pulse_generations.reserve(handles.size());
-      for (PosixConditionBase* handle : handles) {
-        std::lock_guard<std::mutex> lock(handle->mutex_);
+    pulse_generations.reserve(handles.size());
+    for (PosixConditionBase* handle : handles) {
+      std::lock_guard<std::mutex> lock(handle->mutex_);
+      handle->multi_waiters_.push_back(&multi_waiter);
+      if (!wait_all) {
         pulse_generations.push_back(handle->pulse_generation_);
         ++handle->pulse_waiter_count_;
       }
     }
-    auto unregister_pulse_waiter = [&handles, wait_all]() {
-      if (wait_all) {
-        return;
-      }
+    auto unregister_pulse_waiter = [&handles, &multi_waiter, wait_all]() {
       for (PosixConditionBase* handle : handles) {
         std::lock_guard<std::mutex> lock(handle->mutex_);
-        --handle->pulse_waiter_count_;
+        auto& multi_waiters = handle->multi_waiters_;
+        auto it = std::find(multi_waiters.begin(), multi_waiters.end(),
+                            &multi_waiter);
+        if (it != multi_waiters.end()) {
+          multi_waiters.erase(it);
+        }
+        if (!wait_all) {
+          --handle->pulse_waiter_count_;
+        }
       }
     };
 
@@ -523,11 +531,17 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      // Sleep for a short time before polling again
-      auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-      auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-      std::this_thread::sleep_for(sleep_time);
+      // Wait until one of the handles changes its state.
+      {
+        std::unique_lock<std::mutex> waiter_lock(multi_waiter.mutex);
+        auto notified = [&multi_waiter] { return multi_waiter.notified; };
+        if (end_time == std::chrono::steady_clock::time_point::max()) {
+          multi_waiter.cond.wait(waiter_lock, notified);
+        } else {
+          multi_waiter.cond.wait_until(waiter_lock, end_time, notified);
+        }
+        multi_waiter.notified = false;
+      }
     }
   }
 
@@ -536,8 +550,27 @@ class PosixConditionBase {
   }
 
  protected:
+  // A thread waiting for multiple handles, notified when any of them may have
+  // become signaled.
+  struct MultiWaiter {
+    std::mutex mutex;
+    std::condition_variable cond;
+    bool notified = false;
+  };
+
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+
+  // Wakes the threads waiting for this handle to check it again. Must be
+  // called with mutex_ locked.
+  void NotifyAll() {
+    cond_.notify_all();
+    for (MultiWaiter* multi_waiter : multi_waiters_) {
+      std::lock_guard<std::mutex> lock(multi_waiter->mutex);
+      multi_waiter->notified = true;
+      multi_waiter->cond.notify_all();
+    }
+  }
 
   // Releases the threads currently waiting on this object without leaving it
   // signaled (one of them if release_all is false). Waiters are released even
@@ -549,13 +582,15 @@ class PosixConditionBase {
     }
     ++pulse_generation_;
     pulse_release_count_ = release_all ? pulse_waiter_count_ : 1;
-    cond_.notify_all();
+    NotifyAll();
   }
 
   std::condition_variable cond_;
   std::mutex mutex_;
 
  private:
+  std::vector<MultiWaiter*> multi_waiters_;
+
   // Whether a pulse that happened after a waiter registered with the given
   // generation can still release it.
   [[nodiscard]] bool pulsed_since(uint64_t generation) const {
@@ -588,7 +623,7 @@ class PosixCondition<Event> : public PosixConditionBase {
   bool Signal() override {
     auto lock = std::unique_lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -634,7 +669,7 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
       *out_previous_count = count_;
     }
     count_ += release_count;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -642,7 +677,7 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
   [[nodiscard]] bool signaled() const override { return count_ > 0; }
   void post_execution() override {
     count_--;
-    cond_.notify_all();
+    NotifyAll();
   }
   uint32_t count_;
   const uint32_t maximum_count_;
@@ -666,7 +701,7 @@ class PosixCondition<Mutant> final : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
-        cond_.notify_all();
+        NotifyAll();
       }
       return true;
     }
@@ -700,7 +735,7 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   bool Signal() override {
     std::lock_guard lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -1189,7 +1224,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
       exit_code_ = exit_code;
       signaled_ = true;
-      cond_.notify_all();
+      NotifyAll();
     }
     if (is_current_thread) {
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1619,7 +1654,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock lock(thread->handle_.mutex_);
     thread->handle_.exit_code_ = 0;
     thread->handle_.signaled_ = true;
-    thread->handle_.cond_.notify_all();
+    thread->handle_.NotifyAll();
   }
 
   current_thread_ = nullptr;
