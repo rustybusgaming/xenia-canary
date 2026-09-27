@@ -136,8 +136,7 @@ TEST_CASE("VMX_FPCR_DOES_NOT_LEAK_INTO_SCALAR_ACROSS_BLOCKS", "[backend]") {
         },
         [&test](PPCContext* ctx) {
           REQUIRE(ctx->r[3] == 0);
-          REQUIRE(static_cast<float>(ctx->f[3]) ==
-                  std::nextafterf(1.0f, 2.0f));
+          REQUIRE(static_cast<float>(ctx->f[3]) == std::nextafterf(1.0f, 2.0f));
           test.processors[0]->backend()->SetGuestRoundingMode(ctx, 0);
         });
   }
