@@ -9,6 +9,9 @@
 
 #include "xenia/hid/sdl/sdl_input_driver.h"
 
+#include <string_view>
+#include <utility>
+
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
@@ -26,12 +29,69 @@
 DEFINE_path(mappings_file, "gamecontrollerdb.txt",
             "Filename of a database with custom game controller mappings.",
             "SDL");
+DEFINE_string(
+    controller_type, "auto",
+    "Type of controller reported to games for SDL controllers. \"auto\" "
+    "reports the type detected by SDL. Set it to \"gamepad\", \"guitar\", "
+    "\"guitar_alternate\", \"guitar_bass\", \"drum_kit\", \"wheel\", "
+    "\"arcade_stick\", \"flight_stick\", \"dance_pad\" or \"arcade_pad\" "
+    "for controllers detected as another type, such as guitars connected "
+    "through a dongle presenting them as a gamepad.",
+    "SDL");
 
 namespace xe {
 namespace hid {
 namespace sdl {
 
 namespace {
+X_INPUT_DEVSUBTYPE GetXInputSubType(SDL_Joystick* joystick) {
+  static constexpr std::pair<std::string_view, X_INPUT_DEVSUBTYPE>
+      kNamedSubTypes[] = {
+          {"gamepad", XINPUT_DEVSUBTYPE_GAMEPAD},
+          {"wheel", XINPUT_DEVSUBTYPE_WHEEL},
+          {"arcade_stick", XINPUT_DEVSUBTYPE_ARCADE_STICK},
+          {"flight_stick", XINPUT_DEVSUBTYPE_FLIGHT_STICK},
+          {"dance_pad", XINPUT_DEVSUBTYPE_DANCE_PAD},
+          {"guitar", XINPUT_DEVSUBTYPE_GUITAR},
+          {"guitar_alternate", XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE},
+          {"drum_kit", XINPUT_DEVSUBTYPE_DRUM_KIT},
+          {"guitar_bass", XINPUT_DEVSUBTYPE_GUITAR_BASS},
+          {"arcade_pad", XINPUT_DEVSUBTYPE_ARCADE_PAD},
+      };
+  if (cvars::controller_type != "auto") {
+    for (const auto& [name, sub_type] : kNamedSubTypes) {
+      if (cvars::controller_type == name) {
+        return sub_type;
+      }
+    }
+    static bool unknown_type_logged = false;
+    if (!unknown_type_logged) {
+      unknown_type_logged = true;
+      XELOGW("SDL: Unknown controller_type \"{}\", using the detected type",
+             cvars::controller_type);
+    }
+  }
+  // SDL's joystick types don't have the same values as the XInput subtypes.
+  switch (SDL_JoystickGetType(joystick)) {
+    case SDL_JOYSTICK_TYPE_WHEEL:
+      return XINPUT_DEVSUBTYPE_WHEEL;
+    case SDL_JOYSTICK_TYPE_ARCADE_STICK:
+      return XINPUT_DEVSUBTYPE_ARCADE_STICK;
+    case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
+      return XINPUT_DEVSUBTYPE_FLIGHT_STICK;
+    case SDL_JOYSTICK_TYPE_DANCE_PAD:
+      return XINPUT_DEVSUBTYPE_DANCE_PAD;
+    case SDL_JOYSTICK_TYPE_GUITAR:
+      return XINPUT_DEVSUBTYPE_GUITAR;
+    case SDL_JOYSTICK_TYPE_DRUM_KIT:
+      return XINPUT_DEVSUBTYPE_DRUM_KIT;
+    case SDL_JOYSTICK_TYPE_ARCADE_PAD:
+      return XINPUT_DEVSUBTYPE_ARCADE_PAD;
+    default:
+      return XINPUT_DEVSUBTYPE_GAMEPAD;
+  }
+}
+
 // Controllers are added, removed and updated from SDL event watch callbacks,
 // which may run on any thread pumping SDL events, while guest threads access
 // them concurrently. SDL's own joystick lock is used rather than a separate
@@ -736,8 +796,8 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
 
   auto& c = state.caps;
   c.type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
-  c.sub_type = static_cast<uint8_t>(SDL_JoystickGetType(
-      SDL_GameControllerGetJoystick(state.sdl)));  // XINPUT_DEVSUBTYPE_GAMEPAD
+  c.sub_type = static_cast<uint8_t>(
+      GetXInputSubType(SDL_GameControllerGetJoystick(state.sdl)));
   c.flags = cap_flags;
   c.gamepad.buttons =
       0xF3FF | (cvars::guide_button ? X_INPUT_GAMEPAD_GUIDE : 0x0);
