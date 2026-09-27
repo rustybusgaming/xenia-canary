@@ -54,6 +54,9 @@ std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
 
 // Native guest ticks.
 uint64_t last_guest_tick_count_ = 0;
+// Remainder of the last host to guest tick conversion, carried over so that
+// frequent clock queries don't lose time when the ratio isn't an integer.
+uint64_t guest_tick_remainder_ = 0;
 // Last sampled host tick count.
 uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 
@@ -88,6 +91,7 @@ void RecomputeGuestTickScalar() {
 
   std::lock_guard<tick_mutex_type> lock(tick_mutex_);
   guest_tick_ratio_ = frac;
+  guest_tick_remainder_ = 0;
 }
 
 // Update the guest timer for all threads.
@@ -107,8 +111,10 @@ uint64_t UpdateGuestClock() {
                                    ? host_tick_count - last_host_tick_count_
                                    : 0;
     last_host_tick_count_ = host_tick_count;
-    uint64_t guest_tick_delta =
-        host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
+    uint64_t guest_tick_scaled =
+        host_tick_delta * guest_tick_ratio_.first + guest_tick_remainder_;
+    uint64_t guest_tick_delta = guest_tick_scaled / guest_tick_ratio_.second;
+    guest_tick_remainder_ = guest_tick_scaled % guest_tick_ratio_.second;
     last_guest_tick_count_ += guest_tick_delta;
     return last_guest_tick_count_;
   } else {

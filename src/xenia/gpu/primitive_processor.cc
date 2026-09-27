@@ -106,8 +106,10 @@ bool PrimitiveProcessor::InitializeCommon(
     bool full_32bit_vertex_indices_supported, bool triangle_fans_supported,
     bool line_loops_supported, bool quad_lists_supported,
     bool point_sprites_supported_without_vs_expansion,
-    bool rectangle_lists_supported_without_vs_expansion) {
+    bool rectangle_lists_supported_without_vs_expansion,
+    bool strip_primitive_reset_always_enabled) {
   full_32bit_vertex_indices_used_ = full_32bit_vertex_indices_supported;
+  strip_primitive_reset_always_enabled_ = strip_primitive_reset_always_enabled;
   convert_triangle_fans_to_lists_ =
       !triangle_fans_supported || cvars::force_convert_triangle_fans_to_lists;
   convert_line_loops_to_strips_ =
@@ -1012,6 +1014,75 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             }
             cache_transaction.SetNewResult(cacheable);
           }
+        }
+      } else if (strip_primitive_reset_always_enabled_ &&
+                 (host_primitive_type == xenos::PrimitiveType::kLineStrip ||
+                  host_primitive_type == xenos::PrimitiveType::kTriangleStrip ||
+                  host_primitive_type == xenos::PrimitiveType::kTriangleFan) &&
+                 (guest_index_format == xenos::IndexFormat::kInt16 ||
+                  full_32bit_vertex_indices_used_)) {
+        // Primitive reset is disabled by the guest, but it can't be disabled on
+        // the host for strips, so if 0xFFFF or 0xFFFFFFFF is used as a real
+        // index, it must be replaced with something the host doesn't consider
+        // the primitive reset index.
+        // Writing to the trace irrespective of the cache lookup result because
+        // cache behavior depends on runtime configuration and state.
+        trace_writer_.WriteMemoryRead(guest_index_base,
+                                      guest_index_buffer_needed_bytes);
+        CacheTransaction cache_transaction(
+            *this, CacheKey(guest_index_base, guest_draw_vertex_count,
+                            guest_index_format, guest_index_endian, false));
+        if (cache_transaction.GetFoundResult()) {
+          cacheable = *cache_transaction.GetFoundResult();
+        } else {
+          if (guest_index_format == xenos::IndexFormat::kInt16) {
+            auto guest_indices =
+                memory_.TranslatePhysical<const uint16_t*>(guest_index_base);
+            if (IsResetUsed(guest_indices, guest_draw_vertex_count,
+                            UINT16_MAX)) {
+              // Expand to 32 bits, keeping the guest endianness for swapping
+              // in the vertex shader (0xFFFF is the same in any endianness).
+              cacheable.index_buffer_type =
+                  ProcessedIndexBufferType::kHostConverted;
+              cacheable.host_index_format = xenos::IndexFormat::kInt32;
+              auto host_indices = reinterpret_cast<uint32_t*>(
+                  RequestHostConvertedIndexBufferForCurrentFrame(
+                      xenos::IndexFormat::kInt32, guest_draw_vertex_count,
+                      false, guest_index_base,
+                      cacheable.host_index_buffer_handle));
+              if (!host_indices) {
+                return false;
+              }
+              for (uint32_t i = 0; i < guest_draw_vertex_count; ++i) {
+                host_indices[i] = guest_indices[i];
+              }
+            }
+          } else {
+            auto guest_indices =
+                memory_.TranslatePhysical<const uint32_t*>(guest_index_base);
+            if (IsResetUsed(guest_indices, guest_draw_vertex_count, UINT32_MAX,
+                            UINT32_MAX)) {
+              // The guest only uses the low 24 bits of the index, so replace
+              // 0xFFFFFFFF with 0x00FFFFFF in the guest endianness, which the
+              // vertex shader will swap.
+              cacheable.index_buffer_type =
+                  ProcessedIndexBufferType::kHostConverted;
+              auto host_indices = reinterpret_cast<uint32_t*>(
+                  RequestHostConvertedIndexBufferForCurrentFrame(
+                      xenos::IndexFormat::kInt32, guest_draw_vertex_count,
+                      false, guest_index_base,
+                      cacheable.host_index_buffer_handle));
+              if (!host_indices) {
+                return false;
+              }
+              for (uint32_t i = 0; i < guest_draw_vertex_count; ++i) {
+                uint32_t index = guest_indices[i];
+                host_indices[i] =
+                    index != UINT32_MAX ? index : guest_index_mask_guest_endian;
+              }
+            }
+          }
+          cache_transaction.SetNewResult(cacheable);
         }
       }
     }

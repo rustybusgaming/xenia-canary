@@ -257,7 +257,8 @@ class PrimitiveProcessor {
                         bool triangle_fans_supported, bool line_loops_supported,
                         bool quad_lists_supported,
                         bool point_sprites_supported_without_vs_expansion,
-                        bool rectangle_lists_supported_without_vs_expansion);
+                        bool rectangle_lists_supported_without_vs_expansion,
+                        bool strip_primitive_reset_always_enabled = false);
   // If any primitive type conversion is needed for auto-indexed draws, called
   // from InitializeCommon (thus only once in the primitive processor's
   // lifetime) to set up the backend's index buffer containing indices for
@@ -497,7 +498,8 @@ class PrimitiveProcessor {
 
   // TODO(Triang3l): 16-bit > 32-bit primitive type conversion for Metal, where
   // primitive reset is always enabled, if UINT16_MAX is used as a real vertex
-  // index.
+  // index (for primitive types converted to strips - currently only line loops
+  // - passthrough draws are handled).
 
   struct PassthroughIndexTransform {
     uint16_t operator()(uint16_t index) const { return index; }
@@ -707,6 +709,9 @@ class PrimitiveProcessor {
   bool convert_quad_lists_to_triangle_lists_ = false;
   bool expand_point_sprites_in_vs_ = false;
   bool expand_rectangle_lists_in_vs_ = false;
+  // Whether the host always treats 0xFFFF / 0xFFFFFFFF in the indices of
+  // strips and fans as primitive reset, even if it's disabled (Metal).
+  bool strip_primitive_reset_always_enabled_ = false;
 
   // Byte offsets used, for simplicity, directly as handles.
   size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;

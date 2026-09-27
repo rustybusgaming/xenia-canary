@@ -39,6 +39,8 @@
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
 #include <mach/task.h>
+#include <mach/thread_policy.h>
+#include <pthread/qos.h>
 #endif
 
 #if XE_PLATFORM_LINUX
@@ -348,7 +350,10 @@ class PosixConditionBase {
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
-    auto predicate = [this] { return this->signaled(); };
+    uint64_t pulse_generation;
+    auto predicate = [this, &pulse_generation] {
+      return this->signaled() || this->pulsed_since(pulse_generation);
+    };
 
     // Handle robust mutex locking
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
@@ -362,18 +367,27 @@ class PosixConditionBase {
 
     std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
 
-    if (predicate()) {
+    if (signaled()) {
       executed = true;
     } else {
+      // Register as a waiter so that a pulse happening while waiting releases
+      // this thread even if the pulse is over by the time it wakes up.
+      pulse_generation = pulse_generation_;
+      ++pulse_waiter_count_;
       if (timeout == std::chrono::milliseconds::max()) {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
       } else {
         executed = cond_.wait_for(lock, timeout, predicate);
       }
+      --pulse_waiter_count_;
     }
     if (executed) {
-      post_execution();
+      if (signaled()) {
+        post_execution();
+      } else {
+        consume_pulse();
+      }
       return WaitResult::kSuccess;
     }
     return WaitResult::kTimeout;
@@ -397,6 +411,27 @@ class PosixConditionBase {
     auto end_time = (timeout == std::chrono::milliseconds::max())
                         ? std::chrono::steady_clock::time_point::max()
                         : start_time + timeout;
+
+    // When waiting for any of the handles, register as a waiter on each so
+    // that pulses happening between the polls release this thread.
+    std::vector<uint64_t> pulse_generations;
+    if (!wait_all) {
+      pulse_generations.reserve(handles.size());
+      for (PosixConditionBase* handle : handles) {
+        std::lock_guard<std::mutex> lock(handle->mutex_);
+        pulse_generations.push_back(handle->pulse_generation_);
+        ++handle->pulse_waiter_count_;
+      }
+    }
+    auto unregister_pulse_waiter = [&handles, wait_all]() {
+      if (wait_all) {
+        return;
+      }
+      for (PosixConditionBase* handle : handles) {
+        std::lock_guard<std::mutex> lock(handle->mutex_);
+        --handle->pulse_waiter_count_;
+      }
+    };
 
     while (true) {
       // Check all handles to see if any/all are signaled
@@ -451,9 +486,10 @@ class PosixConditionBase {
         }
         condition_met = all_signaled;
       } else {
-        // For wait_any, check if ANY is signaled
+        // For wait_any, check if ANY is signaled or was pulsed
         for (size_t i = 0; i < handles.size(); ++i) {
-          if (handles[i]->signaled()) {
+          if (handles[i]->signaled() ||
+              handles[i]->pulsed_since(pulse_generations[i])) {
             first_signaled = i;
             condition_met = true;
             break;
@@ -467,9 +503,13 @@ class PosixConditionBase {
           for (size_t i = 0; i < handles.size(); ++i) {
             handles[i]->post_execution();
           }
-        } else {
+        } else if (handles[first_signaled]->signaled()) {
           handles[first_signaled]->post_execution();
+        } else {
+          handles[first_signaled]->consume_pulse();
         }
+        locks.clear();
+        unregister_pulse_waiter();
         return std::make_pair(WaitResult::kSuccess, first_signaled);
       }
 
@@ -479,6 +519,7 @@ class PosixConditionBase {
       // Check timeout
       auto now = std::chrono::steady_clock::now();
       if (now >= end_time) {
+        unregister_pulse_waiter();
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
@@ -497,8 +538,37 @@ class PosixConditionBase {
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+
+  // Releases the threads currently waiting on this object without leaving it
+  // signaled (one of them if release_all is false). Waiters are released even
+  // if they only wake up after the pulse, unlike with signaling and resetting.
+  // Must be called with mutex_ locked.
+  void PulseWaiters(bool release_all) {
+    if (!pulse_waiter_count_) {
+      return;
+    }
+    ++pulse_generation_;
+    pulse_release_count_ = release_all ? pulse_waiter_count_ : 1;
+    cond_.notify_all();
+  }
+
   std::condition_variable cond_;
   std::mutex mutex_;
+
+ private:
+  // Whether a pulse that happened after a waiter registered with the given
+  // generation can still release it.
+  [[nodiscard]] bool pulsed_since(uint64_t generation) const {
+    return pulse_release_count_ && generation != pulse_generation_;
+  }
+  void consume_pulse() {
+    assert_not_zero(pulse_release_count_);
+    --pulse_release_count_;
+  }
+
+  uint64_t pulse_generation_ = 0;
+  uint32_t pulse_waiter_count_ = 0;
+  uint32_t pulse_release_count_ = 0;
 };
 
 // There really is no native POSIX handle for a single wait/signal construct
@@ -525,6 +595,14 @@ class PosixCondition<Event> : public PosixConditionBase {
   void Reset() {
     auto lock = std::unique_lock(mutex_);
     signal_ = false;
+  }
+
+  void Pulse() {
+    auto lock = std::unique_lock(mutex_);
+    // Release the current waiters (all for a manual reset event, one for an
+    // auto reset event), leaving the event nonsignaled.
+    signal_ = false;
+    PulseWaiters(manual_reset_);
   }
 
  private:
@@ -693,6 +771,10 @@ struct ThreadStartData {
   std::function<void()> start_routine;
   bool create_suspended;
   Thread* thread_obj;
+#if XE_PLATFORM_MAC
+  // Applied by the thread itself after starting if not 0.
+  int32_t initial_priority = 0;
+#endif
 };
 
 template <>
@@ -726,6 +808,14 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       pthread_attr_destroy(&attr);
       return false;
     }
+#if XE_PLATFORM_MAC
+    // Relative priorities are set with the Mach thread policy after the thread
+    // has started (see set_priority), SCHED_FIFO priorities have a different
+    // meaning on macOS.
+    if (params.initial_priority != 0) {
+      start_data->initial_priority = params.initial_priority;
+    }
+#else
     if (params.initial_priority != 0) {
       sched_param sched{};
       sched.sched_priority = params.initial_priority + 1;
@@ -738,6 +828,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         return false;
       }
     }
+#endif  // XE_PLATFORM_MAC
     if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
       pthread_attr_destroy(&attr);
       return false;
@@ -909,6 +1000,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   int priority() const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    return priority_;
+#endif  // XE_PLATFORM_MAC
     if (!fifo_failed_) {
       int policy;
       sched_param param{};
@@ -932,6 +1026,20 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void set_priority(int new_priority) const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // SCHED_FIFO priorities on macOS are absolute (the normal priority being
+    // 31, and the minimum 15), so the 1...32 range used here would demote
+    // threads, and make the lower ones be scheduled on the efficiency cores.
+    // Instead, adjust the importance of the thread relatively to others in the
+    // process, around the priority of its QoS class.
+    priority_ = new_priority;
+    thread_precedence_policy_data_t precedence_policy;
+    precedence_policy.importance = (new_priority - ThreadPriority::kNormal) / 4;
+    thread_policy_set(pthread_mach_thread_np(thread_), THREAD_PRECEDENCE_POLICY,
+                      reinterpret_cast<thread_policy_t>(&precedence_policy),
+                      THREAD_PRECEDENCE_POLICY_COUNT);
+    return;
+#endif  // XE_PLATFORM_MAC
     if (!fifo_failed_) {
       // Try real-time SCHED_FIFO for best priority control.
       sched_param param{};
@@ -1143,6 +1251,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   pthread_t thread_;
   pid_t tid_ = 0;                     // Kernel TID for setpriority() fallback
   mutable bool fifo_failed_ = false;  // True after SCHED_FIFO was rejected
+#if XE_PLATFORM_MAC
+  mutable int priority_ = ThreadPriority::kNormal;
+#endif
   bool signaled_;
   int exit_code_;
   State state_;  // Protected by state_mutex_
@@ -1295,13 +1406,7 @@ class PosixEvent final : public PosixConditionHandle<Event> {
     assert_always();
     return result;
   }
-  void Pulse() override {
-    using namespace std::chrono_literals;
-    handle_.Signal();
-    MaybeYield();
-    Sleep(10us);
-    handle_.Reset();
-  }
+  void Pulse() override { handle_.Pulse(); }
 };
 
 std::unique_ptr<Event> Event::CreateManualResetEvent(bool initial_state) {
@@ -1464,6 +1569,12 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #endif
   threading::set_name("");
 
+#if XE_PLATFORM_MAC
+  // Emulation is latency-sensitive, like a game - without an explicit QoS
+  // class, threads may be placed on the efficiency cores of Apple silicon.
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+
   auto start_data = static_cast<ThreadStartData*>(parameter);
   assert_not_null(start_data);
   assert_not_null(start_data->thread_obj);
@@ -1471,6 +1582,9 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   auto thread = dynamic_cast<PosixThread*>(start_data->thread_obj);
   auto start_routine = std::move(start_data->start_routine);
   auto create_suspended = start_data->create_suspended;
+#if XE_PLATFORM_MAC
+  int32_t initial_priority = start_data->initial_priority;
+#endif
   delete start_data;
 
   current_thread_ = thread;
@@ -1481,6 +1595,11 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
         create_suspended ? State::kSuspended : State::kRunning;
     thread->handle_.state_signal_.notify_all();
   }
+#if XE_PLATFORM_MAC
+  if (initial_priority != 0) {
+    thread->handle_.set_priority(initial_priority);
+  }
+#endif
 
   if (create_suspended) {
     std::unique_lock lock(thread->handle_.state_mutex_);

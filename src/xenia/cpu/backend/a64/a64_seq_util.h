@@ -295,19 +295,47 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
   }
 }
 
+// Compute a guest memory address from base + offset, returning x0 for
+// [x21, x0] addressing. The 4 KB physical address offset of 0xE0000000+ is
+// applied to the final address (as on x64), not to the base, so accesses
+// whose base and effective address are on different sides of 0xE0000000 are
+// translated correctly.
 template <typename OffsetOp>
-inline XReg AddGuestMemoryOffset(A64Emitter& e, const XReg& base,
-                                 const OffsetOp& offset) {
+inline XReg ComputeMemoryAddressOffset(A64Emitter& e, const I64Op& guest,
+                                       const OffsetOp& offset) {
+  using namespace Xbyak_aarch64;
+  if (guest.is_constant && offset.is_constant) {
+    uint32_t address = static_cast<uint32_t>(guest.constant()) +
+                       static_cast<uint32_t>(offset.constant());
+    if (address >= 0xE0000000 &&
+        xe::memory::allocation_granularity() > 0x1000) {
+      address += 0x1000;
+    }
+    e.mov(e.x0, static_cast<uint64_t>(address));
+    return e.x0;
+  }
   // Guest address arithmetic wraps at 32 bits before the host membase is
   // applied. Keep the add in W registers so stale high bits can't escape into
   // the final host pointer.
-  e.mov(e.w0, WReg(base.getIdx()));
+  if (guest.is_constant) {
+    e.mov(e.w0, static_cast<uint64_t>(static_cast<uint32_t>(guest.constant())));
+  } else {
+    e.mov(e.w0, WReg(guest.reg().getIdx()));
+  }
   if (offset.is_constant) {
     e.mov(e.w17,
           static_cast<uint64_t>(static_cast<uint32_t>(offset.constant())));
     e.add(e.w0, e.w0, e.w17);
   } else {
     e.add(e.w0, e.w0, WReg(offset.reg().getIdx()));
+  }
+  if (xe::memory::allocation_granularity() > 0x1000) {
+    e.mov(e.w17, 0xE0000000u);
+    e.cmp(e.w0, e.w17);
+    auto& skip = e.NewCachedLabel();
+    e.b(LO, skip);
+    e.add(e.w0, e.w0, 1, 12);  // add 0x1000 via LSL #12
+    e.L(skip);
   }
   return e.x0;
 }

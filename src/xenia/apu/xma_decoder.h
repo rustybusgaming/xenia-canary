@@ -36,6 +36,8 @@ class XmaDecoder {
   X_STATUS Setup(kernel::KernelState* kernel_state);
   void Shutdown();
 
+  static constexpr uint32_t kContextCount = 320;
+
   uint32_t context_array_ptr() const {
     return register_file_[XmaRegister::ContextArrayAddress];
   }
@@ -80,7 +82,6 @@ class XmaDecoder {
 
   XmaRegisterFile register_file_;
 
-  static const uint32_t kContextCount = 320;
   XmaContext* contexts_[kContextCount];
   BitMap context_bitmap_;
 

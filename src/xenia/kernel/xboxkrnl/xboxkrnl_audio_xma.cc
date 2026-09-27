@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/apu/audio_system.h"
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/logging.h"
@@ -55,11 +57,28 @@ using xe::apu::XMA_CONTEXT_DATA;
 // restrictions of frame/subframe/etc:
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.xaudio2.xaudio2_buffer(v=vs.85).aspx
 
+// Games may call XMA functions with a null context (for instance, if creating
+// it has failed) - don't access the host memory at address 0 in this case.
+static bool IsXmaContextNull(lpvoid_t context_ptr, const char* function_name) {
+  if (context_ptr) {
+    return false;
+  }
+  static std::atomic<bool> null_context_logged{false};
+  if (!null_context_logged.exchange(true, std::memory_order_relaxed)) {
+    XELOGW(
+        "{}: Called with a null XMA context (further calls with a null "
+        "context are not logged)",
+        function_name);
+  }
+  return true;
+}
+
 dword_result_t XMACreateContext_entry(lpdword_t context_out_ptr) {
   auto xma_decoder = kernel_state()->emulator()->audio_system()->xma_decoder();
   uint32_t context_ptr = xma_decoder->AllocateContext();
   *context_out_ptr = context_ptr;
   if (!context_ptr) {
+    XELOGW("XMACreateContext: Failed to allocate an XMA context");
     return X_STATUS_NO_MEMORY;
   }
   return X_STATUS_SUCCESS;
@@ -68,6 +87,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMACreateContext, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAReleaseContext_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAReleaseContext")) {
+    return 0;
+  }
   auto xma_decoder = kernel_state()->emulator()->audio_system()->xma_decoder();
   xma_decoder->ReleaseContext(context_ptr);
   return 0;
@@ -84,6 +106,16 @@ void StoreXmaContextIndexedRegister(KernelState* kernel_state,
   uint32_t hw_index =
       (context_physical_address - xma_decoder->context_array_ptr()) /
       sizeof(XMA_CONTEXT_DATA);
+  if (context_physical_address == UINT32_MAX ||
+      context_physical_address < xma_decoder->context_array_ptr() ||
+      hw_index >= apu::XmaDecoder::kContextCount) {
+    XELOGW(
+        "XMA: Context 0x{:08X} (physical 0x{:08X}) is not in the context "
+        "array at physical 0x{:08X}",
+        context_ptr, context_physical_address,
+        xma_decoder->context_array_ptr());
+    return;
+  }
   uint32_t reg_num = base_reg + (hw_index >> 5) * 4;
   uint32_t reg_value = 1 << (hw_index & 0x1F);
   xma_decoder->WriteRegister(reg_num, xe::byte_swap(reg_value));
@@ -116,6 +148,9 @@ static_assert_size(XMA_CONTEXT_INIT, 56);
 
 dword_result_t XMAInitializeContext_entry(
     lpvoid_t context_ptr, pointer_t<XMA_CONTEXT_INIT> context_init) {
+  if (IsXmaContextNull(context_ptr, "XMAInitializeContext")) {
+    return 0;
+  }
   // Input buffers may be null (buffer 1 in 415607D4).
   // Convert to host endianness.
   uint32_t input_buffer_0_guest_ptr = context_init->input_buffer_0_ptr;
@@ -192,6 +227,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAInitializeContext, kAudio, kImplemented,
 
 dword_result_t XMASetLoopData_entry(lpvoid_t context_ptr,
                                     pointer_t<XMA_LOOP_DATA> loop_data) {
+  if (IsXmaContextNull(context_ptr, "XMASetLoopData")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
 
   context.loop_start = loop_data->loop_start;
@@ -207,6 +245,9 @@ dword_result_t XMASetLoopData_entry(lpvoid_t context_ptr,
 DECLARE_XBOXKRNL_EXPORT2(XMASetLoopData, kAudio, kImplemented, kHighFrequency);
 
 dword_result_t XMAGetInputBufferReadOffset_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAGetInputBufferReadOffset")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.input_buffer_read_offset;
 }
@@ -215,6 +256,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAGetInputBufferReadOffset, kAudio, kImplemented,
 
 dword_result_t XMASetInputBufferReadOffset_entry(lpvoid_t context_ptr,
                                                  dword_t value) {
+  if (IsXmaContextNull(context_ptr, "XMASetInputBufferReadOffset")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   context.input_buffer_read_offset = value;
   context.Store(context_ptr);
@@ -226,6 +270,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetInputBufferReadOffset, kAudio, kImplemented,
 
 dword_result_t XMASetInputBuffer0_entry(lpvoid_t context_ptr, lpvoid_t buffer,
                                         dword_t packet_count) {
+  if (IsXmaContextNull(context_ptr, "XMASetInputBuffer0")) {
+    return 0;
+  }
   uint32_t buffer_physical_address =
       kernel_memory()->GetPhysicalAddress(buffer.guest_address());
   assert_true(buffer_physical_address != UINT32_MAX);
@@ -249,6 +296,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetInputBuffer0, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAIsInputBuffer0Valid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAIsInputBuffer0Valid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.input_buffer_0_valid;
 }
@@ -256,6 +306,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAIsInputBuffer0Valid, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMASetInputBuffer0Valid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMASetInputBuffer0Valid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   context.input_buffer_0_valid = 1;
   context.Store(context_ptr);
@@ -267,6 +320,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetInputBuffer0Valid, kAudio, kImplemented,
 
 dword_result_t XMASetInputBuffer1_entry(lpvoid_t context_ptr, lpvoid_t buffer,
                                         dword_t packet_count) {
+  if (IsXmaContextNull(context_ptr, "XMASetInputBuffer1")) {
+    return 0;
+  }
   uint32_t buffer_physical_address =
       kernel_memory()->GetPhysicalAddress(buffer.guest_address());
   assert_true(buffer_physical_address != UINT32_MAX);
@@ -290,6 +346,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetInputBuffer1, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAIsInputBuffer1Valid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAIsInputBuffer1Valid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.input_buffer_1_valid;
 }
@@ -297,6 +356,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAIsInputBuffer1Valid, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMASetInputBuffer1Valid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMASetInputBuffer1Valid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   context.input_buffer_1_valid = 1;
   context.Store(context_ptr);
@@ -307,6 +369,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetInputBuffer1Valid, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAIsOutputBufferValid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAIsOutputBufferValid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.output_buffer_valid;
 }
@@ -314,6 +379,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAIsOutputBufferValid, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMASetOutputBufferValid_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMASetOutputBufferValid")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   context.output_buffer_valid = 1;
   context.Store(context_ptr);
@@ -324,6 +392,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetOutputBufferValid, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAGetOutputBufferReadOffset_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAGetOutputBufferReadOffset")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.output_buffer_read_offset;
 }
@@ -332,6 +403,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAGetOutputBufferReadOffset, kAudio, kImplemented,
 
 dword_result_t XMASetOutputBufferReadOffset_entry(lpvoid_t context_ptr,
                                                   dword_t value) {
+  if (IsXmaContextNull(context_ptr, "XMASetOutputBufferReadOffset")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   context.output_buffer_read_offset = value;
   context.Store(context_ptr);
@@ -342,6 +416,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetOutputBufferReadOffset, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAGetOutputBufferWriteOffset_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAGetOutputBufferWriteOffset")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.output_buffer_write_offset;
 }
@@ -349,12 +426,18 @@ DECLARE_XBOXKRNL_EXPORT2(XMAGetOutputBufferWriteOffset, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMAGetPacketMetadata_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAGetPacketMetadata")) {
+    return 0;
+  }
   XMA_CONTEXT_DATA context(context_ptr);
   return context.packet_metadata;
 }
 DECLARE_XBOXKRNL_EXPORT1(XMAGetPacketMetadata, kAudio, kImplemented);
 
 dword_result_t XMAEnableContext_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMAEnableContext")) {
+    return 0;
+  }
   StoreXmaContextIndexedRegister(kernel_state(), 0x1940, context_ptr);
   return 0;
 }
@@ -362,6 +445,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMAEnableContext, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMADisableContext_entry(lpvoid_t context_ptr, dword_t wait) {
+  if (IsXmaContextNull(context_ptr, "XMADisableContext")) {
+    return 0;
+  }
   X_HRESULT result = X_E_SUCCESS;
   StoreXmaContextIndexedRegister(kernel_state(), 0x1A40, context_ptr);
   if (!kernel_state()
@@ -377,6 +463,9 @@ DECLARE_XBOXKRNL_EXPORT2(XMADisableContext, kAudio, kImplemented,
                          kHighFrequency);
 
 dword_result_t XMABlockWhileInUse_entry(lpvoid_t context_ptr) {
+  if (IsXmaContextNull(context_ptr, "XMABlockWhileInUse")) {
+    return 0;
+  }
   do {
     XMA_CONTEXT_DATA context(context_ptr);
     if (!context.input_buffer_0_valid && !context.input_buffer_1_valid) {

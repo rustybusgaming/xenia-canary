@@ -185,3 +185,62 @@ TEST_CASE("STORE_OFFSET_I32_STALE_UPPER_BITS", "[instr]") {
         test.memory->SystemHeapFree(addr);
       });
 }
+
+// =============================================================================
+// On hosts with an allocation granularity above 4 KB, 0xE0000000+ is shifted
+// by 0x1000 in host memory. The shift must depend on the effective address
+// (base + offset), not on the base alone.
+// =============================================================================
+
+TEST_CASE("LOAD_OFFSET_I32_CROSSES_0xE0000000", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto base = LoadGPR(b, 4);
+    auto offset = b.LoadConstantInt64(0x10);
+    StoreGPR(b, 3,
+             b.ZeroExtend(b.LoadOffset(base, offset, INT32_TYPE), INT64_TYPE));
+    b.Return();
+  });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        auto heap = test.memory->LookupHeap(0xE0000000);
+        REQUIRE(
+            heap->AllocFixed(0xE0000000, 0x1000, 0x1000,
+                             kMemoryAllocationReserve | kMemoryAllocationCommit,
+                             kMemoryProtectRead | kMemoryProtectWrite));
+        uint32_t sentinel = 0x13579BDF;
+        std::memcpy(test.memory->TranslateVirtual(0xE0000008), &sentinel, 4);
+        ctx->r[4] = 0xDFFFFFF8u;
+      },
+      [&test](PPCContext* ctx) {
+        REQUIRE(static_cast<uint32_t>(ctx->r[3]) == 0x13579BDF);
+        test.memory->LookupHeap(0xE0000000)->Release(0xE0000000);
+      });
+}
+
+TEST_CASE("STORE_OFFSET_I32_CROSSES_0xE0000000", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto base = LoadGPR(b, 4);
+    auto offset = LoadGPR(b, 5);
+    auto val = b.Truncate(LoadGPR(b, 6), INT32_TYPE);
+    b.StoreOffset(base, offset, val);
+    b.Return();
+  });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        auto heap = test.memory->LookupHeap(0xE0000000);
+        REQUIRE(
+            heap->AllocFixed(0xE0000000, 0x1000, 0x1000,
+                             kMemoryAllocationReserve | kMemoryAllocationCommit,
+                             kMemoryProtectRead | kMemoryProtectWrite));
+        std::memset(test.memory->TranslateVirtual(0xE0000000), 0, 0x10);
+        ctx->r[4] = 0xDFFFFFF8u;
+        ctx->r[5] = 0x10;
+        ctx->r[6] = 0x2468ACE0;
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t result;
+        std::memcpy(&result, test.memory->TranslateVirtual(0xE0000008), 4);
+        REQUIRE(result == 0x2468ACE0);
+        test.memory->LookupHeap(0xE0000000)->Release(0xE0000000);
+      });
+}

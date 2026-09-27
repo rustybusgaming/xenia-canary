@@ -31,7 +31,8 @@ bool VulkanPrimitiveProcessor::Initialize() {
   if (!InitializeCommon(
           device_properties.fullDrawIndexUint32, device_properties.triangleFans,
           false, device_properties.geometryShader,
-          device_properties.geometryShader, device_properties.geometryShader)) {
+          device_properties.geometryShader, device_properties.geometryShader,
+          vulkan_device->IsPrimitiveRestartAlwaysEnabled())) {
     Shutdown();
     return false;
   }
