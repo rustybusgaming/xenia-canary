@@ -452,6 +452,11 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
 
 void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
   ForgetFpcrMode();
+  // CALL_EXTERN ends its block, and registers are allocated per block, so no
+  // guest value is live in the allocatable vector registers across the call,
+  // and the thunk doesn't need to preserve them.
+  auto thunk =
+      reinterpret_cast<uint64_t>(backend()->guest_to_host_extern_thunk());
   bool undefined = true;
   if (function->behavior() == Function::Behavior::kBuiltin) {
     auto builtin_function = static_cast<const BuiltinFunction*>(function);
@@ -462,7 +467,7 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       mov(x0, reinterpret_cast<uint64_t>(builtin_function->handler()));
       mov(x1, reinterpret_cast<uint64_t>(builtin_function->arg0()));
       mov(x2, reinterpret_cast<uint64_t>(builtin_function->arg1()));
-      mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
+      mov(x9, thunk);
       blr(x9);
     }
   } else if (function->behavior() == Function::Behavior::kExtern) {
@@ -473,7 +478,7 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       mov(x0, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
       ldr(x1, ptr(GetContextReg(), static_cast<int32_t>(offsetof(
                                        ppc::PPCContext, kernel_state))));
-      mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
+      mov(x9, thunk);
       blr(x9);
     }
   }

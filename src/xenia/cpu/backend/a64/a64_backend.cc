@@ -62,7 +62,7 @@ class A64HelperEmitter : public A64Emitter {
   A64HelperEmitter(A64Backend* backend, XbyakA64Allocator* allocator);
 
   HostToGuestThunk EmitHostToGuestThunk();
-  GuestToHostThunk EmitGuestToHostThunk();
+  GuestToHostThunk EmitGuestToHostThunk(bool save_vector_registers);
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
 };
@@ -211,7 +211,8 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
 //
 // We save volatile guest registers that we need to preserve across the
 // host call, then call the host function with context as the first arg.
-GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
+GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk(
+    bool save_vector_registers) {
   struct {
     size_t prolog;
     size_t prolog_stack_alloc;
@@ -245,27 +246,33 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   //   q30, q31     sp + 0x1A0
   //   x29, x30     sp + 0x1C0
   //   Total: 0x1D0 = 464 bytes (16-byte aligned)
-  const size_t g2h_stack = 464;
+  //
+  // Without saving the VEC regs (when no guest value can be live in them
+  // across the call), only x29/x30 are saved, at sp + 0x000.
+  const size_t g2h_stack = save_vector_registers ? 464 : 16;
+  const int32_t fp_lr_offset = save_vector_registers ? 0x1C0 : 0x000;
   sub(sp, sp, static_cast<uint32_t>(g2h_stack));
   code_offsets.prolog_stack_alloc = getSize();
 
-  // Save guest-allocated VEC regs (full Q = 128-bit).
-  stp(Xbyak_aarch64::QReg(4), Xbyak_aarch64::QReg(5), ptr(sp, 0x000));
-  stp(Xbyak_aarch64::QReg(6), Xbyak_aarch64::QReg(7), ptr(sp, 0x020));
-  stp(Xbyak_aarch64::QReg(8), Xbyak_aarch64::QReg(9), ptr(sp, 0x040));
-  stp(Xbyak_aarch64::QReg(10), Xbyak_aarch64::QReg(11), ptr(sp, 0x060));
-  stp(Xbyak_aarch64::QReg(12), Xbyak_aarch64::QReg(13), ptr(sp, 0x080));
-  stp(Xbyak_aarch64::QReg(14), Xbyak_aarch64::QReg(15), ptr(sp, 0x0A0));
-  stp(Xbyak_aarch64::QReg(16), Xbyak_aarch64::QReg(17), ptr(sp, 0x0C0));
-  stp(Xbyak_aarch64::QReg(18), Xbyak_aarch64::QReg(19), ptr(sp, 0x0E0));
-  stp(Xbyak_aarch64::QReg(20), Xbyak_aarch64::QReg(21), ptr(sp, 0x100));
-  stp(Xbyak_aarch64::QReg(22), Xbyak_aarch64::QReg(23), ptr(sp, 0x120));
-  stp(Xbyak_aarch64::QReg(24), Xbyak_aarch64::QReg(25), ptr(sp, 0x140));
-  stp(Xbyak_aarch64::QReg(26), Xbyak_aarch64::QReg(27), ptr(sp, 0x160));
-  stp(Xbyak_aarch64::QReg(28), Xbyak_aarch64::QReg(29), ptr(sp, 0x180));
-  stp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
+  if (save_vector_registers) {
+    // Save guest-allocated VEC regs (full Q = 128-bit).
+    stp(Xbyak_aarch64::QReg(4), Xbyak_aarch64::QReg(5), ptr(sp, 0x000));
+    stp(Xbyak_aarch64::QReg(6), Xbyak_aarch64::QReg(7), ptr(sp, 0x020));
+    stp(Xbyak_aarch64::QReg(8), Xbyak_aarch64::QReg(9), ptr(sp, 0x040));
+    stp(Xbyak_aarch64::QReg(10), Xbyak_aarch64::QReg(11), ptr(sp, 0x060));
+    stp(Xbyak_aarch64::QReg(12), Xbyak_aarch64::QReg(13), ptr(sp, 0x080));
+    stp(Xbyak_aarch64::QReg(14), Xbyak_aarch64::QReg(15), ptr(sp, 0x0A0));
+    stp(Xbyak_aarch64::QReg(16), Xbyak_aarch64::QReg(17), ptr(sp, 0x0C0));
+    stp(Xbyak_aarch64::QReg(18), Xbyak_aarch64::QReg(19), ptr(sp, 0x0E0));
+    stp(Xbyak_aarch64::QReg(20), Xbyak_aarch64::QReg(21), ptr(sp, 0x100));
+    stp(Xbyak_aarch64::QReg(22), Xbyak_aarch64::QReg(23), ptr(sp, 0x120));
+    stp(Xbyak_aarch64::QReg(24), Xbyak_aarch64::QReg(25), ptr(sp, 0x140));
+    stp(Xbyak_aarch64::QReg(26), Xbyak_aarch64::QReg(27), ptr(sp, 0x160));
+    stp(Xbyak_aarch64::QReg(28), Xbyak_aarch64::QReg(29), ptr(sp, 0x180));
+    stp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
+  }
   // Save x29/x30 (FP/LR).
-  stp(x29, x30, ptr(sp, 0x1C0));
+  stp(x29, x30, ptr(sp, fp_lr_offset));
 
   code_offsets.body = getSize();
 
@@ -298,21 +305,23 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   code_offsets.epilog = getSize();
 
   // Restore.
-  ldp(x29, x30, ptr(sp, 0x1C0));
-  ldp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
-  ldp(Xbyak_aarch64::QReg(28), Xbyak_aarch64::QReg(29), ptr(sp, 0x180));
-  ldp(Xbyak_aarch64::QReg(26), Xbyak_aarch64::QReg(27), ptr(sp, 0x160));
-  ldp(Xbyak_aarch64::QReg(24), Xbyak_aarch64::QReg(25), ptr(sp, 0x140));
-  ldp(Xbyak_aarch64::QReg(22), Xbyak_aarch64::QReg(23), ptr(sp, 0x120));
-  ldp(Xbyak_aarch64::QReg(20), Xbyak_aarch64::QReg(21), ptr(sp, 0x100));
-  ldp(Xbyak_aarch64::QReg(18), Xbyak_aarch64::QReg(19), ptr(sp, 0x0E0));
-  ldp(Xbyak_aarch64::QReg(16), Xbyak_aarch64::QReg(17), ptr(sp, 0x0C0));
-  ldp(Xbyak_aarch64::QReg(14), Xbyak_aarch64::QReg(15), ptr(sp, 0x0A0));
-  ldp(Xbyak_aarch64::QReg(12), Xbyak_aarch64::QReg(13), ptr(sp, 0x080));
-  ldp(Xbyak_aarch64::QReg(10), Xbyak_aarch64::QReg(11), ptr(sp, 0x060));
-  ldp(Xbyak_aarch64::QReg(8), Xbyak_aarch64::QReg(9), ptr(sp, 0x040));
-  ldp(Xbyak_aarch64::QReg(6), Xbyak_aarch64::QReg(7), ptr(sp, 0x020));
-  ldp(Xbyak_aarch64::QReg(4), Xbyak_aarch64::QReg(5), ptr(sp, 0x000));
+  ldp(x29, x30, ptr(sp, fp_lr_offset));
+  if (save_vector_registers) {
+    ldp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
+    ldp(Xbyak_aarch64::QReg(28), Xbyak_aarch64::QReg(29), ptr(sp, 0x180));
+    ldp(Xbyak_aarch64::QReg(26), Xbyak_aarch64::QReg(27), ptr(sp, 0x160));
+    ldp(Xbyak_aarch64::QReg(24), Xbyak_aarch64::QReg(25), ptr(sp, 0x140));
+    ldp(Xbyak_aarch64::QReg(22), Xbyak_aarch64::QReg(23), ptr(sp, 0x120));
+    ldp(Xbyak_aarch64::QReg(20), Xbyak_aarch64::QReg(21), ptr(sp, 0x100));
+    ldp(Xbyak_aarch64::QReg(18), Xbyak_aarch64::QReg(19), ptr(sp, 0x0E0));
+    ldp(Xbyak_aarch64::QReg(16), Xbyak_aarch64::QReg(17), ptr(sp, 0x0C0));
+    ldp(Xbyak_aarch64::QReg(14), Xbyak_aarch64::QReg(15), ptr(sp, 0x0A0));
+    ldp(Xbyak_aarch64::QReg(12), Xbyak_aarch64::QReg(13), ptr(sp, 0x080));
+    ldp(Xbyak_aarch64::QReg(10), Xbyak_aarch64::QReg(11), ptr(sp, 0x060));
+    ldp(Xbyak_aarch64::QReg(8), Xbyak_aarch64::QReg(9), ptr(sp, 0x040));
+    ldp(Xbyak_aarch64::QReg(6), Xbyak_aarch64::QReg(7), ptr(sp, 0x020));
+    ldp(Xbyak_aarch64::QReg(4), Xbyak_aarch64::QReg(5), ptr(sp, 0x000));
+  }
 
   add(sp, sp, static_cast<uint32_t>(g2h_stack));
   ret();
@@ -328,7 +337,7 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   func_info.prolog_stack_alloc_offset =
       code_offsets.prolog_stack_alloc - code_offsets.prolog;
   func_info.stack_size = g2h_stack;
-  func_info.lr_save_offset = 0x1C8;  // stp x29, x30, [sp, #0x1C0]
+  func_info.lr_save_offset = fp_lr_offset + 8;  // stp x29, x30
 
   void* fn = Emplace(func_info);
   return reinterpret_cast<GuestToHostThunk>(fn);
@@ -665,11 +674,12 @@ bool A64Backend::Initialize(Processor* processor) {
   A64HelperEmitter thunk_emitter(this, &allocator);
 
   host_to_guest_thunk_ = thunk_emitter.EmitHostToGuestThunk();
-  guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk();
+  guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk(true);
+  guest_to_host_extern_thunk_ = thunk_emitter.EmitGuestToHostThunk(false);
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
 
   if (!host_to_guest_thunk_ || !guest_to_host_thunk_ ||
-      !resolve_function_thunk_) {
+      !guest_to_host_extern_thunk_ || !resolve_function_thunk_) {
     XELOGE("A64Backend: Failed to generate thunks");
     return false;
   }

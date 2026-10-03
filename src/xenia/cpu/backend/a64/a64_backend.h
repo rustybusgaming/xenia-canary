@@ -103,6 +103,12 @@ class A64Backend : public Backend {
 
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
   GuestToHostThunk guest_to_host_thunk() const { return guest_to_host_thunk_; }
+  // Like guest_to_host_thunk, but doesn't preserve the allocatable vector
+  // registers, for calls after which no guest value is live in registers -
+  // such as CALL_EXTERN, which ends its block.
+  GuestToHostThunk guest_to_host_extern_thunk() const {
+    return guest_to_host_extern_thunk_;
+  }
   ResolveFunctionThunk resolve_function_thunk() const {
     return resolve_function_thunk_;
   }
@@ -153,6 +159,7 @@ class A64Backend : public Backend {
 
   HostToGuestThunk host_to_guest_thunk_ = nullptr;
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
+  GuestToHostThunk guest_to_host_extern_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
 
