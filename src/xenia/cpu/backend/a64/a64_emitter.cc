@@ -169,15 +169,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Store zero for call return address (we haven't made a call yet).
   str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
 
-  // Record stackpoint for longjmp recovery, then save the resulting depth
+  // Record stackpoint for longjmp recovery, and save the resulting depth
   // for post-call detection (if depth changes, a longjmp skipped frames).
   PushStackpoint();
-  if (cvars::a64_enable_host_guest_stack_synchronization) {
-    ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
-                          A64BackendContext, current_stackpoint_depth))));
-    str(w16, ptr(sp, static_cast<uint32_t>(
-                         StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  }
 
   // ========================================================================
   // BODY
@@ -215,6 +209,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
+      }
+      if (NeedsFpuFpcr(instr)) {
+        ChangeFpcrMode(FPCRMode::Fpu);
       }
       const hir::Instr* new_tail = instr;
       if (!SelectSequence(this, instr, &new_tail)) {
@@ -509,24 +506,85 @@ void A64Emitter::ReloadMembase() {
 }
 
 bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
+  assert_true(new_mode != FPCRMode::Unknown);
   if (fpcr_mode_ == new_mode) {
     return false;
   }
+  bool mode_known = fpcr_mode_ != FPCRMode::Unknown;
   fpcr_mode_ = new_mode;
+  // Writing FPCR may stall the pipeline, and the mode is unknown at every
+  // block boundary and after every call, so kA64BackendFPCRModeBit in the
+  // backend context flags tracks the mode FPCR is actually in (set for VMX).
+  // Only w0 is used as a scratch register, and NZCV is preserved.
+  auto bctx = GetBackendCtxReg();
+  auto flags_ptr = Xbyak_aarch64::ptr(
+      bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags)));
+  auto& done = NewCachedLabel();
   if (!already_set) {
-    // Load the pre-computed FPCR value from the backend context.
-    // This avoids an expensive MRS + read-modify-write cycle.
-    auto bctx = GetBackendCtxReg();
-    if (new_mode == FPCRMode::Vmx) {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_vmx))));
-    } else {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_fpu))));
+    if (!mode_known) {
+      // Skip the write if FPCR is already in the requested mode.
+      ldr(w0, flags_ptr);
+      if (new_mode == FPCRMode::Vmx) {
+        tbnz(w0, kA64BackendFPCRModeBit, done);
+      } else {
+        tbz(w0, kA64BackendFPCRModeBit, done);
+      }
     }
+    ldr(w0, Xbyak_aarch64::ptr(
+                bctx, static_cast<uint32_t>(
+                          new_mode == FPCRMode::Vmx
+                              ? offsetof(A64BackendContext, fpcr_vmx)
+                              : offsetof(A64BackendContext, fpcr_fpu))));
     msr(3, 3, 4, 4, 0, x0);  // msr FPCR, x0
   }
+  ldr(w0, flags_ptr);
+  if (new_mode == FPCRMode::Vmx) {
+    orr(w0, w0, 1u << kA64BackendFPCRModeBit);
+  } else {
+    and_(w0, w0, ~(1u << kA64BackendFPCRModeBit));
+  }
+  str(w0, flags_ptr);
+  L(done);
   return true;
+}
+
+bool A64Emitter::NeedsFpuFpcr(const hir::Instr* instr) {
+  switch (instr->GetOpcodeNum()) {
+    case hir::OPCODE_ADD:
+    case hir::OPCODE_SUB:
+    case hir::OPCODE_MUL:
+    case hir::OPCODE_DIV:
+    case hir::OPCODE_MUL_ADD:
+    case hir::OPCODE_MUL_SUB:
+    case hir::OPCODE_SQRT:
+    case hir::OPCODE_RSQRT:
+    case hir::OPCODE_RECIP:
+    case hir::OPCODE_POW2:
+    case hir::OPCODE_LOG2:
+    case hir::OPCODE_MAX:
+    case hir::OPCODE_MIN:
+    case hir::OPCODE_ROUND:
+    case hir::OPCODE_CONVERT:
+    case hir::OPCODE_TO_SINGLE:
+    case hir::OPCODE_COMPARE_EQ:
+    case hir::OPCODE_COMPARE_NE:
+    case hir::OPCODE_COMPARE_SLT:
+    case hir::OPCODE_COMPARE_SLE:
+    case hir::OPCODE_COMPARE_SGT:
+    case hir::OPCODE_COMPARE_SGE:
+    case hir::OPCODE_COMPARE_ULT:
+    case hir::OPCODE_COMPARE_ULE:
+    case hir::OPCODE_COMPARE_UGT:
+    case hir::OPCODE_COMPARE_UGE:
+      break;
+    default:
+      return false;
+  }
+  auto is_scalar_float = [](const hir::Value* value) {
+    return value && (value->type == hir::FLOAT32_TYPE ||
+                     value->type == hir::FLOAT64_TYPE);
+  };
+  return is_scalar_float(instr->dest) || is_scalar_float(instr->src1.value);
 }
 
 Label& A64Emitter::AddToTail(TailEmitCallback callback, uint32_t alignment) {
@@ -566,38 +624,49 @@ void A64Emitter::PushStackpoint() {
   if (!cvars::a64_enable_host_guest_stack_synchronization) {
     return;
   }
+  // This is done in the prolog of every guest function, so keep it short.
   // x8 = stackpoints array, w9 = current depth
   ldr(x8, ptr(x19,
               static_cast<uint32_t>(offsetof(A64BackendContext, stackpoints))));
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
+  // Guest r1 and LR (32-bit).
+  ldr(w11, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  ldr(w12, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  // x8 = &stackpoints[w9]
+  static_assert(sizeof(A64BackendStackpoint) == 16,
+                "The stackpoint address is computed with a shift by 4");
+  add(x8, x8, w9, UXTW, 4);
 
-  // Store host SP.
+  // Store host SP, guest r1 and guest LR.
   mov(x10, sp);
   str(x10, ptr(x8, static_cast<uint32_t>(
                        offsetof(A64BackendStackpoint, host_stack_))));
-  // Store guest r1 (32-bit).
-  ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
-  str(w10, ptr(x8, static_cast<uint32_t>(
-                       offsetof(A64BackendStackpoint, guest_stack_))));
-  // Store guest LR (32-bit).
-  ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
-  str(w10, ptr(x8, static_cast<uint32_t>(
-                       offsetof(A64BackendStackpoint, guest_return_address_))));
+  static_assert(offsetof(A64BackendStackpoint, guest_return_address_) ==
+                    offsetof(A64BackendStackpoint, guest_stack_) + 4,
+                "Guest r1 and LR are stored as a pair");
+  stp(w11, w12,
+      ptr(x8,
+          static_cast<int32_t>(offsetof(A64BackendStackpoint, guest_stack_))));
 
-  // Increment depth.
+  // Increment depth, and save the new depth for post-call longjmp detection.
   add(w9, w9, 1);
   str(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
+  str(w9, ptr(sp, static_cast<uint32_t>(
+                      StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
 
   // Check for overflow.
-  mov(w10, static_cast<uint32_t>(cvars::a64_max_stackpoints));
-  cmp(w9, w10);
+  uint64_t max_stackpoints = static_cast<uint64_t>(cvars::a64_max_stackpoints);
+  if (max_stackpoints <= 0xFFF) {
+    cmp(w9, static_cast<uint32_t>(max_stackpoints));
+  } else if (!(max_stackpoints & 0xFFF) && max_stackpoints <= 0xFFF000) {
+    cmp(w9, static_cast<uint32_t>(max_stackpoints >> 12), 12);
+  } else {
+    mov(w10, static_cast<uint32_t>(max_stackpoints));
+    cmp(w9, w10);
+  }
   auto& overflow_label = AddToTail([](A64Emitter& e, Label& lbl) {
     e.CallNativeSafe(
         reinterpret_cast<void*>(A64Emitter::HandleStackpointOverflowError));

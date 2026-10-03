@@ -44,9 +44,10 @@ template <typename Fn>
 inline void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
   // Enter VMX FPCR mode using tracked lazy switching.  If the emitter
   // is already in VMX mode (e.g. consecutive VMX ops in the same basic
-  // block) this is a no-op — no system register access at all.
-  // FPU mode is restored at block boundaries and calls via ForgetFpcrMode,
-  // or on demand by scalar FP sequences via ChangeFpcrMode(Fpu).
+  // block) this is a no-op — no system register access at all. At block
+  // boundaries and after calls, the mode is checked at runtime, and FPCR is
+  // only written if it's not already in the VMX mode. Scalar FP sequences
+  // switch back to the FPU mode via ChangeFpcrMode(Fpu).
   e.ChangeFpcrMode(FPCRMode::Vmx);
   emit_op();
 }
