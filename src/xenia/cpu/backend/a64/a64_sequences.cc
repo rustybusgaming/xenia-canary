@@ -2373,26 +2373,29 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
   struct NAME##_I32                                                            \
       : Sequence<NAME##_I32, I<OPCODE_##NAME, I8Op, I32Op, I32Op>> {           \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
-      if (i.src1.is_constant) {                                                \
-        e.mov(e.w0, static_cast<uint64_t>(                                     \
-                        static_cast<uint32_t>(i.src1.constant())));            \
-        if (i.src2.is_constant) {                                              \
-          e.mov(e.w1, static_cast<uint64_t>(                                   \
-                          static_cast<uint32_t>(i.src2.constant())));          \
-          e.cmp(e.w0, e.w1);                                                   \
+      if (!e.HasCompareFlags(i.instr)) {                                       \
+        if (i.src1.is_constant) {                                              \
+          e.mov(e.w0, static_cast<uint64_t>(                                   \
+                          static_cast<uint32_t>(i.src1.constant())));          \
+          if (i.src2.is_constant) {                                            \
+            e.mov(e.w1, static_cast<uint64_t>(                                 \
+                            static_cast<uint32_t>(i.src2.constant())));        \
+            e.cmp(e.w0, e.w1);                                                 \
+          } else {                                                             \
+            e.cmp(e.w0, i.src2);                                               \
+          }                                                                    \
+        } else if (i.src2.is_constant) {                                       \
+          uint32_t imm = static_cast<uint32_t>(i.src2.constant());             \
+          if (imm <= 4095) {                                                   \
+            e.cmp(i.src1, imm);                                                \
+          } else {                                                             \
+            e.mov(e.w0, static_cast<uint64_t>(imm));                           \
+            e.cmp(i.src1, e.w0);                                               \
+          }                                                                    \
         } else {                                                               \
-          e.cmp(e.w0, i.src2);                                                 \
+          e.cmp(i.src1, i.src2);                                               \
         }                                                                      \
-      } else if (i.src2.is_constant) {                                         \
-        uint32_t imm = static_cast<uint32_t>(i.src2.constant());               \
-        if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, imm);                                                  \
-        } else {                                                               \
-          e.mov(e.w0, static_cast<uint64_t>(imm));                             \
-          e.cmp(i.src1, e.w0);                                                 \
-        }                                                                      \
-      } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.SetCompareFlags(i.instr);                                            \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \
@@ -2400,24 +2403,27 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
   struct NAME##_I64                                                            \
       : Sequence<NAME##_I64, I<OPCODE_##NAME, I8Op, I64Op, I64Op>> {           \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
-      if (i.src1.is_constant) {                                                \
-        e.mov(e.x0, static_cast<uint64_t>(i.src1.constant()));                 \
-        if (i.src2.is_constant) {                                              \
-          e.mov(e.x1, static_cast<uint64_t>(i.src2.constant()));               \
-          e.cmp(e.x0, e.x1);                                                   \
+      if (!e.HasCompareFlags(i.instr)) {                                       \
+        if (i.src1.is_constant) {                                              \
+          e.mov(e.x0, static_cast<uint64_t>(i.src1.constant()));               \
+          if (i.src2.is_constant) {                                            \
+            e.mov(e.x1, static_cast<uint64_t>(i.src2.constant()));             \
+            e.cmp(e.x0, e.x1);                                                 \
+          } else {                                                             \
+            e.cmp(e.x0, i.src2);                                               \
+          }                                                                    \
+        } else if (i.src2.is_constant) {                                       \
+          uint64_t imm = static_cast<uint64_t>(i.src2.constant());             \
+          if (imm <= 4095) {                                                   \
+            e.cmp(i.src1, static_cast<uint32_t>(imm));                         \
+          } else {                                                             \
+            e.mov(e.x0, imm);                                                  \
+            e.cmp(i.src1, e.x0);                                               \
+          }                                                                    \
         } else {                                                               \
-          e.cmp(e.x0, i.src2);                                                 \
+          e.cmp(i.src1, i.src2);                                               \
         }                                                                      \
-      } else if (i.src2.is_constant) {                                         \
-        uint64_t imm = static_cast<uint64_t>(i.src2.constant());               \
-        if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, static_cast<uint32_t>(imm));                           \
-        } else {                                                               \
-          e.mov(e.x0, imm);                                                    \
-          e.cmp(i.src1, e.x0);                                                 \
-        }                                                                      \
-      } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.SetCompareFlags(i.instr);                                            \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \
@@ -2472,26 +2478,29 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
   struct NAME##_I32                                                            \
       : Sequence<NAME##_I32, I<OPCODE_##NAME, I8Op, I32Op, I32Op>> {           \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
-      if (i.src1.is_constant) {                                                \
-        e.mov(e.w0, static_cast<uint64_t>(                                     \
-                        static_cast<uint32_t>(i.src1.constant())));            \
-        if (i.src2.is_constant) {                                              \
-          e.mov(e.w1, static_cast<uint64_t>(                                   \
-                          static_cast<uint32_t>(i.src2.constant())));          \
-          e.cmp(e.w0, e.w1);                                                   \
+      if (!e.HasCompareFlags(i.instr)) {                                       \
+        if (i.src1.is_constant) {                                              \
+          e.mov(e.w0, static_cast<uint64_t>(                                   \
+                          static_cast<uint32_t>(i.src1.constant())));          \
+          if (i.src2.is_constant) {                                            \
+            e.mov(e.w1, static_cast<uint64_t>(                                 \
+                            static_cast<uint32_t>(i.src2.constant())));        \
+            e.cmp(e.w0, e.w1);                                                 \
+          } else {                                                             \
+            e.cmp(e.w0, i.src2);                                               \
+          }                                                                    \
+        } else if (i.src2.is_constant) {                                       \
+          uint32_t imm = static_cast<uint32_t>(i.src2.constant());             \
+          if (imm <= 4095) {                                                   \
+            e.cmp(i.src1, imm);                                                \
+          } else {                                                             \
+            e.mov(e.w0, static_cast<uint64_t>(imm));                           \
+            e.cmp(i.src1, e.w0);                                               \
+          }                                                                    \
         } else {                                                               \
-          e.cmp(e.w0, i.src2);                                                 \
+          e.cmp(i.src1, i.src2);                                               \
         }                                                                      \
-      } else if (i.src2.is_constant) {                                         \
-        uint32_t imm = static_cast<uint32_t>(i.src2.constant());               \
-        if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, imm);                                                  \
-        } else {                                                               \
-          e.mov(e.w0, static_cast<uint64_t>(imm));                             \
-          e.cmp(i.src1, e.w0);                                                 \
-        }                                                                      \
-      } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.SetCompareFlags(i.instr);                                            \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \
@@ -2499,24 +2508,27 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
   struct NAME##_I64                                                            \
       : Sequence<NAME##_I64, I<OPCODE_##NAME, I8Op, I64Op, I64Op>> {           \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
-      if (i.src1.is_constant) {                                                \
-        e.mov(e.x0, static_cast<uint64_t>(i.src1.constant()));                 \
-        if (i.src2.is_constant) {                                              \
-          e.mov(e.x1, static_cast<uint64_t>(i.src2.constant()));               \
-          e.cmp(e.x0, e.x1);                                                   \
+      if (!e.HasCompareFlags(i.instr)) {                                       \
+        if (i.src1.is_constant) {                                              \
+          e.mov(e.x0, static_cast<uint64_t>(i.src1.constant()));               \
+          if (i.src2.is_constant) {                                            \
+            e.mov(e.x1, static_cast<uint64_t>(i.src2.constant()));             \
+            e.cmp(e.x0, e.x1);                                                 \
+          } else {                                                             \
+            e.cmp(e.x0, i.src2);                                               \
+          }                                                                    \
+        } else if (i.src2.is_constant) {                                       \
+          uint64_t imm = static_cast<uint64_t>(i.src2.constant());             \
+          if (imm <= 4095) {                                                   \
+            e.cmp(i.src1, static_cast<uint32_t>(imm));                         \
+          } else {                                                             \
+            e.mov(e.x0, imm);                                                  \
+            e.cmp(i.src1, e.x0);                                               \
+          }                                                                    \
         } else {                                                               \
-          e.cmp(e.x0, i.src2);                                                 \
+          e.cmp(i.src1, i.src2);                                               \
         }                                                                      \
-      } else if (i.src2.is_constant) {                                         \
-        uint64_t imm = static_cast<uint64_t>(i.src2.constant());               \
-        if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, static_cast<uint32_t>(imm));                           \
-        } else {                                                               \
-          e.mov(e.x0, imm);                                                    \
-          e.cmp(i.src1, e.x0);                                                 \
-        }                                                                      \
-      } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.SetCompareFlags(i.instr);                                            \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \

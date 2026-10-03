@@ -190,6 +190,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // Reset FPCR tracking on each block entry (we don't know which
     // predecessor ran, so mode is unknown).
     ForgetFpcrMode();
+    ForgetCompareFlags();
 
     // Bind all labels targeting this block.
     auto label = block->label_head;
@@ -208,7 +209,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
         if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
+          ForgetCompareFlags();
         }
+      }
+      if (!PreservesCompareFlags(instr)) {
+        ForgetCompareFlags();
       }
       if (NeedsFpuFpcr(instr)) {
         ChangeFpcrMode(FPCRMode::Fpu);
@@ -551,6 +556,31 @@ bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
   str(w0, flags_ptr);
   L(done);
   return true;
+}
+
+bool A64Emitter::PreservesCompareFlags(const hir::Instr* instr) {
+  switch (instr->GetOpcodeNum()) {
+    case hir::OPCODE_SOURCE_OFFSET:
+      return true;
+    case hir::OPCODE_STORE_CONTEXT:
+      // mov of a constant and strb only.
+      return instr->src2.value->type == hir::INT8_TYPE;
+    case hir::OPCODE_COMPARE_EQ:
+    case hir::OPCODE_COMPARE_NE:
+    case hir::OPCODE_COMPARE_SLT:
+    case hir::OPCODE_COMPARE_SLE:
+    case hir::OPCODE_COMPARE_SGT:
+    case hir::OPCODE_COMPARE_SGE:
+    case hir::OPCODE_COMPARE_ULT:
+    case hir::OPCODE_COMPARE_ULE:
+    case hir::OPCODE_COMPARE_UGT:
+    case hir::OPCODE_COMPARE_UGE:
+      // The I32 and I64 compare sequences track the flags themselves.
+      return instr->src1.value->type == hir::INT32_TYPE ||
+             instr->src1.value->type == hir::INT64_TYPE;
+    default:
+      return false;
+  }
 }
 
 bool A64Emitter::NeedsFpuFpcr(const hir::Instr* instr) {
