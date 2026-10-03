@@ -1128,3 +1128,65 @@ TEST_CASE("ROTATE_LEFT_I32", "[bitwise]") {
         REQUIRE(static_cast<uint32_t>(ctx->r[3]) == 0x12345678);
       });
 }
+
+// A PPC compare is translated to lt, gt and eq compares of the same values,
+// separated by stores of the results to the context, and the backend may emit
+// the comparison only once for them. Interleave compares of other values, and
+// check every result.
+TEST_CASE("COMPARE_SAME_OPERANDS_SEQUENCE", "[compare]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto a32 = b.Truncate(LoadGPR(b, 4), INT32_TYPE);
+    auto b32 = b.Truncate(LoadGPR(b, 5), INT32_TYPE);
+    auto c64 = LoadGPR(b, 6);
+    auto d64 = LoadGPR(b, 7);
+    auto lt = b.CompareSLT(a32, b32);
+    b.StoreContext(offsetof(PPCContext, cr0) + 0, lt);
+    auto gt = b.CompareSGT(a32, b32);
+    b.StoreContext(offsetof(PPCContext, cr0) + 1, gt);
+    // Different operands in between.
+    auto ult64 = b.CompareULT(c64, d64);
+    b.StoreContext(offsetof(PPCContext, cr1) + 0, ult64);
+    auto eq = b.CompareEQ(a32, b32);
+    b.StoreContext(offsetof(PPCContext, cr0) + 2, eq);
+    auto ugt = b.CompareUGT(a32, b32);
+    auto ugt64 = b.CompareUGT(c64, d64);
+    auto eq64 = b.CompareEQ(c64, d64);
+    // Pack the results into r3: one bit each.
+    Value* result = b.ZeroExtend(lt, INT64_TYPE);
+    int bit = 1;
+    for (Value* v : {gt, ult64, eq, ugt, ugt64, eq64}) {
+      result = b.Or(result, b.Shl(b.ZeroExtend(v, INT64_TYPE), bit++));
+    }
+    StoreGPR(b, 3, result);
+    b.Return();
+  });
+  struct Case {
+    uint64_t a, b, c, d;
+  };
+  for (const Case& c : {Case{1, 2, 3, 4}, Case{2, 1, 4, 3}, Case{5, 5, 7, 7},
+                        Case{0xFFFFFFFF, 1, 0x100000000ull, 1},
+                        Case{1, 0xFFFFFFFF, 1, 0x100000000ull}}) {
+    test.Run(
+        [&c](PPCContext* ctx) {
+          ctx->r[4] = c.a;
+          ctx->r[5] = c.b;
+          ctx->r[6] = c.c;
+          ctx->r[7] = c.d;
+        },
+        [&c](PPCContext* ctx) {
+          int32_t sa = static_cast<int32_t>(c.a),
+                  sb = static_cast<int32_t>(c.b);
+          uint32_t ua = static_cast<uint32_t>(c.a),
+                   ub = static_cast<uint32_t>(c.b);
+          uint64_t expected =
+              uint64_t(sa < sb) | (uint64_t(sa > sb) << 1) |
+              (uint64_t(c.c < c.d) << 2) | (uint64_t(ua == ub) << 3) |
+              (uint64_t(ua > ub) << 4) | (uint64_t(c.c > c.d) << 5) |
+              (uint64_t(c.c == c.d) << 6);
+          REQUIRE(ctx->r[3] == expected);
+          REQUIRE(ctx->cr0.cr0_lt == uint8_t(sa < sb));
+          REQUIRE(ctx->cr0.cr0_gt == uint8_t(sa > sb));
+          REQUIRE(ctx->cr0.cr0_eq == uint8_t(ua == ub));
+        });
+  }
+}

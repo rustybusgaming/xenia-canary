@@ -147,6 +147,27 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // needs a specific mode only writes FPCR if the mode is different.
   void ForgetFpcrMode() { fpcr_mode_ = FPCRMode::Unknown; }
   bool ChangeFpcrMode(FPCRMode new_mode, bool already_set = false);
+
+  // Integer compare flag reuse. PPC compares become multiple HIR compares of
+  // the same values (lt, gt, eq), separated only by context stores of the
+  // results, which don't change NZCV - only the first needs to emit cmp.
+  // Whether NZCV is from a cmp of the operands of this compare instruction.
+  bool HasCompareFlags(const hir::Instr* instr) const {
+    return compare_flags_src1_ && compare_flags_src1_ == instr->src1.value &&
+           compare_flags_src2_ == instr->src2.value;
+  }
+  // Called after emitting a cmp of the operands of a compare instruction.
+  void SetCompareFlags(const hir::Instr* instr) {
+    compare_flags_src1_ = instr->src1.value;
+    compare_flags_src2_ = instr->src2.value;
+  }
+  void ForgetCompareFlags() {
+    compare_flags_src1_ = nullptr;
+    compare_flags_src2_ = nullptr;
+  }
+  // Whether the instruction is emitted without changing NZCV, or is an integer
+  // compare that keeps the compare flag state up to date itself.
+  static bool PreservesCompareFlags(const hir::Instr* instr);
   // Whether the instruction is a scalar floating-point operation whose result
   // depends on FPCR (rounding mode, flush to zero), and thus must be emitted
   // with the guest FPU FPCR.
@@ -199,6 +220,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   std::unordered_map<uint32_t, Xbyak_aarch64::Label*> label_map_;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
+  const hir::Value* compare_flags_src1_ = nullptr;
+  const hir::Value* compare_flags_src2_ = nullptr;
   bool synchronize_stack_on_next_instruction_ = false;
 };
 

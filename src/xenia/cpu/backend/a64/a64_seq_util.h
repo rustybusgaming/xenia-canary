@@ -407,6 +407,9 @@ inline void PrepareVmxFpSources(A64Emitter& e, const T1& op1, const T2& op2,
   out_s2 = 1;
 }
 
+inline void FixupVmxNanLanes_V128(A64Emitter& e);
+inline void FixupVmxNanLanes_V128_Fma(A64Emitter& e);
+
 // Fix PPC NaN propagation for V128 float32 lanes after a NEON FP operation.
 // Expects: v0=flushed src1, v1=flushed src2, v2=hardware FP result.
 // Modifies v2 in place. Clobbers v0, v1, v3, w0, w16, w17.
@@ -417,12 +420,26 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
   using namespace Xbyak_aarch64;
   auto& done = e.NewCachedLabel();
 
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);  // all-1s for non-NaN
-  e.uminv(SReg(3), VReg(3).s4);                 // min across lanes
-  e.fmov(e.w0, SReg(3));
-  e.cbnz(e.w0, done);  // all non-NaN → skip
+  // NaN results are rare, so fix them up in the tail code, keeping the common
+  // path short.
+  auto& fixup =
+      e.AddToTail([&done](A64Emitter& e, Xbyak_aarch64::Label& label) {
+        FixupVmxNanLanes_V128(e);
+        e.b(done);
+      });
 
+  // Fast path: if no result lane is NaN, skip the fixup. The maximum across
+  // the lanes is NaN if any lane is NaN.
+  e.fmaxv(SReg(3), VReg(2).s4);
+  e.fcmp(SReg(3), SReg(3));
+  e.b(VS, fixup);  // a NaN lane → fix up
+
+  e.L(done);
+}
+
+// The lane fixup part of FixupVmxNan_V128.
+inline void FixupVmxNanLanes_V128(A64Emitter& e) {
+  using namespace Xbyak_aarch64;
   // Save s1/s2 to stack for scalar lane extraction.
   e.str(QReg(0), ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
   e.str(QReg(1),
@@ -474,8 +491,6 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
 
     e.L(lane_ok);
   }
-
-  e.L(done);
 }
 
 // Fix PPC NaN propagation for V128 FMA result (3 source operands).
@@ -489,12 +504,26 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
   using namespace Xbyak_aarch64;
   auto& done = e.NewCachedLabel();
 
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);
-  e.uminv(SReg(3), VReg(3).s4);
-  e.fmov(e.w0, SReg(3));
-  e.cbnz(e.w0, done);
+  // NaN results are rare, so fix them up in the tail code, keeping the common
+  // path short.
+  auto& fixup =
+      e.AddToTail([&done](A64Emitter& e, Xbyak_aarch64::Label& label) {
+        FixupVmxNanLanes_V128_Fma(e);
+        e.b(done);
+      });
 
+  // Fast path: if no result lane is NaN, skip the fixup. The maximum across
+  // the lanes is NaN if any lane is NaN.
+  e.fmaxv(SReg(3), VReg(2).s4);
+  e.fcmp(SReg(3), SReg(3));
+  e.b(VS, fixup);  // a NaN lane → fix up
+
+  e.L(done);
+}
+
+// The lane fixup part of FixupVmxNan_V128_Fma.
+inline void FixupVmxNanLanes_V128_Fma(A64Emitter& e) {
+  using namespace Xbyak_aarch64;
   // NaN threshold constant.
   e.mov(e.w16, 0xFF000000u);
 
@@ -548,8 +577,6 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
 
     e.L(lane_ok);
   }
-
-  e.L(done);
 }
 
 // VMX float32x4 binary operations with full PPC semantics.
